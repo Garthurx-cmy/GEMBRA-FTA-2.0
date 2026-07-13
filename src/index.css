@@ -1,0 +1,89 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
+body {
+  font-family: var(--font-sans);
+  background-color: #f8fafc;
+  counter-reset: page;
+}
+
+/* Print CSS Rules for Premium PDF Reports */
+@media print {
+  /* Set A4 margins to avoid standard browser headers and reserve breathing space */
+  @page {
+    size: A4 portrait;
+    margin: 1.6cm 1.4cm 1.4cm 1.4cm;
+  }
+
+  body {
+    background-color: #ffffff !important;
+    font-size: 11pt !important;
+    color: #1e293b !important;
+  }
+  
+  /* Hide all non-printable elements like sidebars, headers, and filter bars */
+  #sidebar-container,
+  .no-print,
+  .no-print-container > :not(#printable-report-document),
+  #app-header,
+  #sidebar-toggle-btn {
+    display: none !important;
+  }
+
+  /* Make document take 100% full width and omit scrollbars */
+  #printable-report-document {
+    width: 100% !important;
+    max-width: 100% !important;
+    border: none !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    display: block !important;
+  }
+
+  /* Keep table repeat headers and footers intact on page breaks */
+  thead {
+    display: table-header-group !important;
+  }
+  tfoot {
+    display: table-footer-group !important;
+  }
+  tr {
+    page-break-inside: avoid !important;
+    break-inside: avoid !important;
+  }
+
+  /* Avoid breaking sections across pages (especially grids and signatures) */
+  .break-inside-avoid,
+  .page-break-inside-avoid {
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+  }
+
+  /* Automatic page numbering for printed reports */
+  .print-page-num::after {
+    counter-increment: page;
+    content: counter(page);
+  }
+}
+
+/* Elegant custom animations */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}

@@ -1,0 +1,6 @@
+{
+  "name": "GEMBA FTA",
+  "description": "Sistema de gestão e controle de inspeções GEMBA da FTA Serviços Industriais com indicadores, Farol GEMBA, ranking de supervisores e relatórios automatizados.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

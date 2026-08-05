@@ -1,0 +1,6 @@
+{
+  "firestore": {
+    "database": "ai-studio-gembafta-570b0537-aea6-4a55-ac2a-d81d9f8cc2d0",
+    "rules": "firestore.rules"
+  }
+}

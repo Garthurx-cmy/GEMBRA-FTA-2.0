@@ -1,0 +1,175 @@
+{
+  "entities": {
+    "notification": {
+      "title": "Notification",
+      "description": "App notification tracking system events",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userName": { "type": "string" },
+        "action": { "type": "string" },
+        "tipoLancamento": { "type": "string" },
+        "dataHora": { "type": "string" },
+        "read": { "type": "boolean" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "userName", "action", "dataHora", "read", "createdAt"]
+    },
+    "inspection": {
+      "title": "Inspection",
+      "description": "Ocorrência ou auditoria GEMBA lançada",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "data": { "type": "string" },
+        "supervisorId": { "type": "string" },
+        "areaId": { "type": "string" },
+        "contratoId": { "type": "string" },
+        "atividade": { "type": "string" },
+        "tipo": { "type": "string" },
+        "potencial": { "type": "string" },
+        "descricao": { "type": "string" },
+        "acaoCorretiva": { "type": "string" },
+        "responsavel": { "type": "string" },
+        "prazo": { "type": "string" },
+        "status": { "type": "string" },
+        "observacoes": { "type": "string" },
+        "fotosAntes": { "type": "array" },
+        "fotosDepois": { "type": "array" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" },
+        "temaDSS": { "type": "string" },
+        "quantidadeParticipantes": { "type": "number" },
+        "dataConclusao": { "type": "string" }
+      },
+      "required": ["id", "data", "supervisorId", "areaId", "contratoId", "atividade", "tipo", "descricao", "createdAt", "updatedAt"]
+    },
+    "supervisor": {
+      "title": "Supervisor",
+      "description": "Supervisor cadastrado no sistema",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "nome": { "type": "string" },
+        "email": { "type": "string" },
+        "telefone": { "type": "string" },
+        "ativo": { "type": "boolean" }
+      },
+      "required": ["id", "nome", "ativo"]
+    },
+    "area": {
+      "title": "Area",
+      "description": "Área operacional cadastrada no sistema",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "nome": { "type": "string" },
+        "codigo": { "type": "string" },
+        "ativa": { "type": "boolean" }
+      },
+      "required": ["id", "nome", "ativa"]
+    },
+    "contract": {
+      "title": "Contract",
+      "description": "Contrato / Localidade cadastrada",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "codigo": { "type": "string" },
+        "nome": { "type": "string" },
+        "ativo": { "type": "boolean" }
+      },
+      "required": ["id", "codigo", "nome", "ativo"]
+    },
+    "user": {
+      "title": "UserProfile",
+      "description": "Perfil de usuário e acessos",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "nome": { "type": "string" },
+        "email": { "type": "string" },
+        "perfil": { "type": "string" },
+        "ativo": { "type": "boolean" },
+        "cargo": { "type": "string" }
+      },
+      "required": ["id", "nome", "email", "perfil", "ativo"]
+    },
+    "deletedName": {
+      "title": "DeletedName",
+      "description": "Nomes deletados salvos para rastreabilidade",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" }
+      },
+      "required": ["id", "name"]
+    },
+    "systemConfig": {
+      "title": "SystemConfig",
+      "description": "Configuração global do sistema",
+      "type": "object",
+      "properties": {
+        "logoUrl": { "type": "string" },
+        "nomeEmpresa": { "type": "string" },
+        "nomeSistema": { "type": "string" },
+        "temaEscuro": { "type": "boolean" },
+        "responsavelAssinaturaNome": { "type": "string" },
+        "responsavelAssinaturaCargo": { "type": "string" },
+        "tiposInspecao": { "type": "array" },
+        "processosChecklist": { "type": "array" }
+      },
+      "required": ["logoUrl", "nomeEmpresa", "nomeSistema", "temaEscuro"]
+    },
+    "authorizedEmail": {
+      "title": "AuthorizedEmail",
+      "description": "E-mails autorizados a acessar o sistema",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "email": { "type": "string" },
+        "ativo": { "type": "boolean" },
+        "perfilPadrao": { "type": "string" }
+      },
+      "required": ["id", "email", "ativo", "perfilPadrao"]
+    }
+  },
+  "firestore": {
+    "notifications/{notificationId}": {
+      "schema": "notification",
+      "description": "Collection of system notifications"
+    },
+    "inspections/{inspectionId}": {
+      "schema": "inspection",
+      "description": "Collection of GEMBA inspections"
+    },
+    "supervisors/{supervisorId}": {
+      "schema": "supervisor",
+      "description": "Collection of registered supervisors"
+    },
+    "areas/{areaId}": {
+      "schema": "area",
+      "description": "Collection of operational areas"
+    },
+    "contracts/{contractId}": {
+      "schema": "contract",
+      "description": "Collection of contracts / localities"
+    },
+    "users/{userId}": {
+      "schema": "user",
+      "description": "Collection of user access profiles"
+    },
+    "authorized_emails/{authorizedEmailId}": {
+      "schema": "authorizedEmail",
+      "description": "Collection of authorized email addresses"
+    },
+    "deleted_names/{deletedNameId}": {
+      "schema": "deletedName",
+      "description": "Collection of deleted names for history"
+    },
+    "settings/{settingId}": {
+      "schema": "systemConfig",
+      "description": "Collection of configuration options"
+    }
+  }
+}

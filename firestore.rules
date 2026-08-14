@@ -9,10 +9,11 @@ service cloud.firestore {
     }
     function manager() { return active() && profile().perfil in ['Gestor', 'gestor']; }
     function operational() { return active() && profile().perfil in ['Supervisor', 'supervisor', 'Gestor', 'gestor', 'Administrador', 'admin', 'Desenvolvedor/Admin', 'desenvolvedor']; }
+    function visitor() { return active() && profile().perfil in ['Visitante', 'visitante']; }
 
     match /users/{uid} {
-      allow read: if active() && (request.auth.uid == uid || admin());
-      allow create: if admin();
+      allow read: if signedIn() && (request.auth.uid == uid || admin());
+      allow create: if admin() || (signedIn() && request.auth.uid == uid);
       allow update: if admin() || (
         signedIn() && request.auth.uid == uid &&
         request.resource.data.diff(resource.data).affectedKeys()
@@ -21,7 +22,10 @@ service cloud.firestore {
       allow delete: if admin() && request.auth.uid != uid;
     }
     match /inspections/{id} {
-      allow read, create, update: if operational();
+      allow read: if active();
+      allow create, update: if operational() && !visitor() &&
+        (!('fotosAntes' in request.resource.data) || request.resource.data.fotosAntes.size() <= 3) &&
+        (!('fotosDepois' in request.resource.data) || request.resource.data.fotosDepois.size() <= 3);
       allow delete: if admin();
     }
     match /supervisors/{id} {
@@ -41,7 +45,8 @@ service cloud.firestore {
       allow write: if admin();
     }
     match /notifications/{id} {
-      allow read, create, update: if active();
+      allow read: if active();
+      allow create, update: if active() && !visitor();
       allow delete: if admin();
     }
     match /authorized_emails/{id} {

@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 import { dbService } from "../services/db";
 import {
   Inspection,
@@ -36,12 +36,22 @@ import {
   X,
   Printer
 } from "lucide-react";
+import ResolvedImage from "./ResolvedImage";
+
+
+import {
+  getEffectiveMonthKey,
+  getInspectionMonthKey,
+  getMonthOptions
+} from "../utils/inspectionUtils";
 
 interface HistoricoViewProps {
   inspections: Inspection[];
   supervisors: Supervisor[];
   areas: Area[];
   contracts: Contract[];
+  selectedMonth?: string;
+  onSelectMonth?: (month: string) => void;
   onEdit: (inspection: Inspection) => void;
   onDelete: (id: string) => void;
   onMarkAsDone: (id: string) => void;
@@ -54,12 +64,25 @@ export default function HistoricoView({
   supervisors,
   areas,
   contracts,
+  selectedMonth: propSelectedMonth,
+  onSelectMonth,
   onEdit,
   onDelete,
   onMarkAsDone,
   onGeneratePDF,
   currentUser
 }: HistoricoViewProps) {
+  const [localMonth, setLocalMonth] = useState("auto");
+  const activeMonth = propSelectedMonth !== undefined ? propSelectedMonth : localMonth;
+  const effectiveMonthKey = getEffectiveMonthKey(activeMonth);
+
+  const handleMonthChange = (val: string) => {
+    if (onSelectMonth) {
+      onSelectMonth(val);
+    } else {
+      setLocalMonth(val);
+    }
+  };
   // --- FILTER & SEARCH STATES ---
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedSupervisor, setSelectedSupervisor] = useState("all");
@@ -75,45 +98,89 @@ export default function HistoricoView({
   const [galleryInspection, setGalleryInspection] = useState<Inspection | null>(null);
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
 
-  // --- FILTERED INSPECTIONS ---
-  const filteredInspections = useMemo(() => {
-    return inspections.filter((item) => {
-      // Search term (ID, Description, Action, Responsavel, etc.)
-      const term = searchTerm.toLowerCase();
-      const matchesSearch =
-        item.descricao.toLowerCase().includes(term) ||
-        item.acaoCorretiva.toLowerCase().includes(term) ||
-        item.responsavel.toLowerCase().includes(term) ||
-        (item.observacoes && item.observacoes.toLowerCase().includes(term)) ||
-        item.id.toLowerCase().includes(term);
+  // --- PHOTO ROTATION STATE & HANDLER ---
+  const [savingRotationId, setSavingRotationId] = useState<string | null>(null);
 
-      if (!matchesSearch) return false;
+  const handleRotatePhoto = async (
+    inspection: Inspection,
+    type: "before" | "after",
+    index: number,
+    direction: "left" | "right"
+  ) => {
+    const id = `${inspection.id}-${type}-${index}`;
+    setSavingRotationId(id);
 
-      // Supervisor
-      if (selectedSupervisor !== "all" && item.supervisorId !== selectedSupervisor) return false;
+    try {
+      // Get current rotation arrays
+      const currentAntes = inspection.rotacoesFotosAntes || [];
+      const currentDepois = inspection.rotacoesFotosDepois || [];
 
-      // Area
-      if (selectedArea !== "all" && item.areaId !== selectedArea) return false;
+      // Make sure the arrays have the same length as the photos array (initialized with 0 if missing)
+      const numAntes = inspection.fotosAntes?.length || 0;
+      const numDepois = inspection.fotosDepois?.length || 0;
 
-      // Contract
-      if (selectedContract !== "all" && item.contratoId !== selectedContract) return false;
+      const antesRot = Array.from({ length: numAntes }, (_, i) => currentAntes[i] || 0);
+      const depoisRot = Array.from({ length: numDepois }, (_, i) => currentDepois[i] || 0);
 
-      // Type
-      if (selectedTipo !== "all" && getTipoLancamento(item.atividade, item.tipo) !== selectedTipo) return false;
+      if (type === "before") {
+        const currentAngle = antesRot[index] || 0;
+        const diff = direction === "left" ? -90 : 90;
+        const newAngle = ((currentAngle + diff) % 360 + 360) % 360;
+        antesRot[index] = newAngle;
+      } else {
+        const currentAngle = depoisRot[index] || 0;
+        const diff = direction === "left" ? -90 : 90;
+        const newAngle = ((currentAngle + diff) % 360 + 360) % 360;
+        depoisRot[index] = newAngle;
+      }
 
-      // Status
-      if (selectedStatus !== "all" && item.status !== selectedStatus) return false;
+      const updatedInspection: Inspection = {
+        ...inspection,
+        rotacoesFotosAntes: antesRot,
+        rotacoesFotosDepois: depoisRot,
+        updatedAt: new Date().toISOString()
+      };
 
-      // Potential
-      if (selectedPotencial !== "all" && item.potencial !== selectedPotencial) return false;
+      await dbService.saveInspection(updatedInspection);
 
-      // Date
-      if (filterDate && item.data !== filterDate) return false;
+      // Also update the local state if it's currently open in any of the modals
+      if (viewingInspection && viewingInspection.id === inspection.id) {
+        setViewingInspection(updatedInspection);
+      }
+      if (galleryInspection && galleryInspection.id === inspection.id) {
+        setGalleryInspection(updatedInspection);
+      }
+    } catch (err) {
+      console.error("Erro ao salvar rotação:", err);
+    } finally {
+      setSavingRotationId(null);
+    }
+  };
 
-      return true;
-    });
+  // --- PAGINATION STATES ---
+  const [localInspections, setLocalInspections] = useState<Inspection[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [hasMore, setHasMore] = useState(false);
+  const [docHistory, setDocHistory] = useState<(string | null)[]>([null]);
+  const [refreshTrigger, setRefreshTrigger] = useState(0);
+
+  // Sync / Listen to DB updates to auto-refresh current page
+  useEffect(() => {
+    const handleDbUpdate = (e: any) => {
+      if (e.detail?.key === "inspections") {
+        setRefreshTrigger(prev => prev + 1);
+      }
+    };
+    window.addEventListener("gemba_fta_db_update", handleDbUpdate);
+    return () => window.removeEventListener("gemba_fta_db_update", handleDbUpdate);
+  }, []);
+
+  // Reset to first page when search terms or filter configurations change
+  useEffect(() => {
+    setCurrentPage(1);
+    setDocHistory([null]);
   }, [
-    inspections,
     searchTerm,
     selectedSupervisor,
     selectedArea,
@@ -122,6 +189,129 @@ export default function HistoricoView({
     selectedStatus,
     selectedPotencial,
     filterDate
+  ]);
+
+  // Load paginated data from Firestore on-demand
+  useEffect(() => {
+    let active = true;
+    const fetchData = async () => {
+      if (document.visibilityState !== "visible") return;
+      setLoading(true);
+      try {
+        const startAfterId = docHistory[currentPage - 1] || null;
+        const result = await dbService.getPaginatedInspections({
+          limit: 25,
+          startAfterDocId: startAfterId,
+          filters: {
+            searchTerm: searchTerm.trim() || undefined,
+            supervisorId: selectedSupervisor,
+            areaId: selectedArea,
+            contratoId: selectedContract,
+            status: selectedStatus,
+            potencial: selectedPotencial,
+            data: filterDate || undefined,
+            tipo: selectedTipo
+          }
+        });
+        
+        if (active) {
+          setLocalInspections(result.items);
+          setHasMore(result.hasMore);
+          if (result.lastDocId) {
+            setDocHistory(prev => {
+              const copy = [...prev];
+              copy[currentPage] = result.lastDocId;
+              return copy;
+            });
+          }
+        }
+      } catch (err) {
+        console.error("Erro ao carregar histórico paginado:", err);
+      } finally {
+        if (active) setLoading(false);
+      }
+    };
+
+    // Debounce to prevent multiple queries during typing
+    const timer = setTimeout(fetchData, 350);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [
+    currentPage,
+    searchTerm,
+    selectedSupervisor,
+    selectedArea,
+    selectedContract,
+    selectedTipo,
+    selectedStatus,
+    selectedPotencial,
+    filterDate,
+    refreshTrigger
+  ]);
+
+  // Map filteredInspections to memoized list filtered by active month and criteria
+  const filteredInspections = useMemo(() => {
+    const list = inspections && inspections.length > 0 ? inspections : localInspections;
+    return list.filter((item) => {
+      // Month filter
+      if (activeMonth !== "all_months") {
+        const monthKey = getInspectionMonthKey(item);
+        if (monthKey !== effectiveMonthKey) return false;
+      }
+      // Supervisor filter
+      if (selectedSupervisor !== "all" && item.supervisorId !== selectedSupervisor) return false;
+      // Area filter
+      if (selectedArea !== "all" && item.areaId !== selectedArea) return false;
+      // Contract filter
+      if (selectedContract !== "all" && item.contratoId !== selectedContract) return false;
+      // Tipo filter
+      if (selectedTipo !== "all" && getTipoLancamento(item.atividade, item.tipo) !== selectedTipo) return false;
+      // Status filter
+      if (selectedStatus !== "all" && item.status !== selectedStatus) return false;
+      // Potencial filter
+      if (selectedPotencial !== "all" && item.potencial !== selectedPotencial) return false;
+      // Date filter
+      if (filterDate && item.data !== filterDate) return false;
+      // Search term
+      if (searchTerm.trim()) {
+        const term = searchTerm.trim().toLowerCase();
+        const supName = getSupervisorName(item.supervisorId).toLowerCase();
+        const areaName = getAreaName(item.areaId).toLowerCase();
+        const contractCode = getContractCode(item.contratoId).toLowerCase();
+        const desc = (item.descricao || "").toLowerCase();
+        const id = (item.id || "").toLowerCase();
+        const acao = (item.acaoCorretiva || "").toLowerCase();
+        if (
+          !supName.includes(term) &&
+          !areaName.includes(term) &&
+          !contractCode.includes(term) &&
+          !desc.includes(term) &&
+          !id.includes(term) &&
+          !acao.includes(term)
+        ) {
+          return false;
+        }
+      }
+      return true;
+    });
+  }, [
+    inspections,
+    localInspections,
+    activeMonth,
+    effectiveMonthKey,
+    selectedSupervisor,
+    selectedArea,
+    selectedContract,
+    selectedTipo,
+    selectedStatus,
+    selectedPotencial,
+    filterDate,
+    searchTerm,
+    supervisors,
+    areas,
+    contracts
   ]);
 
   // Helper resolvers
@@ -193,7 +383,23 @@ export default function HistoricoView({
         </div>
 
         {/* Categories filters */}
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3 pt-2 border-t border-gray-50">
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 pt-2 border-t border-gray-50">
+          {/* Mês de Referência */}
+          <div className="flex flex-col gap-1">
+            <span className="text-[10px] font-bold text-gray-500 uppercase">Mês de Referência</span>
+            <select
+              value={activeMonth}
+              onChange={(e) => handleMonthChange(e.target.value)}
+              className="text-xs bg-gray-50 border border-gray-150 rounded-lg p-2 text-gray-800 font-extrabold"
+            >
+              {getMonthOptions(inspections).map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
           {/* Supervisor */}
           <div className="flex flex-col gap-1">
             <span className="text-[10px] font-bold text-gray-500 uppercase">Supervisor</span>
@@ -371,16 +577,18 @@ export default function HistoricoView({
                       </button>
 
                       {/* Editar */}
-                      <button
-                        onClick={() => onEdit(item)}
-                        className="p-1.5 text-orange-600 hover:bg-orange-50 rounded transition cursor-pointer"
-                        title="Editar Registro"
-                      >
-                        <Edit size={14} />
-                      </button>
+                      {currentUser?.perfil !== "visitante" && (
+                        <button
+                          onClick={() => onEdit(item)}
+                          className="p-1.5 text-orange-600 hover:bg-orange-50 rounded transition cursor-pointer"
+                          title="Editar Registro"
+                        >
+                          <Edit size={14} />
+                        </button>
+                      )}
 
                       {/* Marcar Concluido shortcut */}
-                      {item.status !== InspectionStatus.CONCLUIDO && (
+                      {currentUser?.perfil !== "visitante" && item.status !== InspectionStatus.CONCLUIDO && (
                         <button
                           onClick={() => onMarkAsDone(item.id)}
                           className="p-1.5 text-green-600 hover:bg-green-50 rounded transition cursor-pointer"
@@ -432,6 +640,32 @@ export default function HistoricoView({
               )}
             </tbody>
           </table>
+        </div>
+        
+        {/* Pagination controls */}
+        <div className="flex items-center justify-between px-6 py-4 bg-gray-50 border-t border-gray-100">
+          <div className="text-[10px] text-gray-500 font-extrabold tracking-wider uppercase flex items-center gap-2">
+            <span>Página {currentPage}</span>
+            {loading && (
+              <span className="inline-block w-2.5 h-2.5 border-2 border-blue-600 border-t-transparent rounded-full animate-spin"></span>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
+              disabled={currentPage === 1 || loading}
+              className="px-3 py-1.5 bg-white border border-gray-200 text-[#0B2E59] text-xs font-bold rounded-lg hover:bg-gray-50 disabled:opacity-50 transition-colors cursor-pointer"
+            >
+              Anterior
+            </button>
+            <button
+              onClick={() => setCurrentPage(prev => prev + 1)}
+              disabled={!hasMore || loading}
+              className="px-3 py-1.5 bg-white border border-gray-200 text-[#0B2E59] text-xs font-bold rounded-lg hover:bg-gray-50 disabled:opacity-50 transition-colors cursor-pointer"
+            >
+              Próximo
+            </button>
+          </div>
         </div>
       </div>
 
@@ -579,8 +813,71 @@ export default function HistoricoView({
                     {viewingInspection.fotosAntes.length > 0 && (
                       <div className="space-y-1 text-center">
                         <span className="text-[9px] uppercase font-bold text-red-500 block">Antes</span>
-                        <div className="aspect-video rounded overflow-hidden border border-gray-100">
-                          <img src={viewingInspection.fotosAntes[0]} alt="Antes" className="w-full h-full object-cover" />
+                        <div className="flex flex-col items-center w-full">
+                          <div className="aspect-video rounded overflow-hidden border border-gray-100 bg-gray-50 relative group w-full">
+                            <ResolvedImage
+                              src={viewingInspection.fotosAntes[0]}
+                              rotation={viewingInspection.rotacoesFotosAntes ? viewingInspection.rotacoesFotosAntes[0] || 0 : 0}
+                              alt="Antes"
+                              className="w-full h-full object-cover"
+                            />
+                            {/* Desktop hover controls */}
+                            {currentUser?.perfil !== "visitante" && (
+                              <div className="absolute inset-0 bg-black/45 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center gap-1.5 no-print p-2">
+                                {savingRotationId === `${viewingInspection.id}-before-0` ? (
+                                  <span className="text-[10px] text-white font-extrabold animate-pulse bg-black/50 px-2 py-1 rounded">
+                                    Salvando rotação...
+                                  </span>
+                                ) : (
+                                  <div className="flex items-center gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={() => handleRotatePhoto(viewingInspection, "before", 0, "left")}
+                                      className="p-1.5 bg-white/90 hover:bg-white text-gray-800 rounded-full shadow hover:scale-110 transition cursor-pointer flex items-center justify-center"
+                                      title="Girar para esquerda"
+                                    >
+                                      <span className="text-sm font-bold">↺</span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleRotatePhoto(viewingInspection, "before", 0, "right")}
+                                      className="p-1.5 bg-white/90 hover:bg-white text-gray-800 rounded-full shadow hover:scale-110 transition cursor-pointer flex items-center justify-center"
+                                      title="Girar para direita"
+                                    >
+                                      <span className="text-sm font-bold">↻</span>
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                          {/* Mobile persistent controls */}
+                          {currentUser?.perfil !== "visitante" && (
+                            <div className="flex items-center gap-2 mt-1.5 no-print md:hidden">
+                              {savingRotationId === `${viewingInspection.id}-before-0` ? (
+                                <span className="text-[9px] text-orange-500 font-bold animate-pulse">
+                                  Salvando rotação...
+                                </span>
+                              ) : (
+                                <>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleRotatePhoto(viewingInspection, "before", 0, "left")}
+                                    className="px-2 py-1 bg-gray-100 hover:bg-gray-200 text-gray-700 text-[10px] font-bold rounded flex items-center gap-0.5"
+                                  >
+                                    ↺ Esq
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleRotatePhoto(viewingInspection, "before", 0, "right")}
+                                    className="px-2 py-1 bg-gray-100 hover:bg-gray-200 text-gray-700 text-[10px] font-bold rounded flex items-center gap-0.5"
+                                  >
+                                    ↻ Dir
+                                  </button>
+                                </>
+                              )}
+                            </div>
+                          )}
                         </div>
                       </div>
                     )}
@@ -588,8 +885,71 @@ export default function HistoricoView({
                     {viewingInspection.fotosDepois.length > 0 && (
                       <div className="space-y-1 text-center">
                         <span className="text-[9px] uppercase font-bold text-green-500 block">Depois</span>
-                        <div className="aspect-video rounded overflow-hidden border border-gray-100">
-                          <img src={viewingInspection.fotosDepois[0]} alt="Depois" className="w-full h-full object-cover" />
+                        <div className="flex flex-col items-center w-full">
+                          <div className="aspect-video rounded overflow-hidden border border-gray-100 bg-gray-50 relative group w-full">
+                            <ResolvedImage
+                              src={viewingInspection.fotosDepois[0]}
+                              rotation={viewingInspection.rotacoesFotosDepois ? viewingInspection.rotacoesFotosDepois[0] || 0 : 0}
+                              alt="Depois"
+                              className="w-full h-full object-cover"
+                            />
+                            {/* Desktop hover controls */}
+                            {currentUser?.perfil !== "visitante" && (
+                              <div className="absolute inset-0 bg-black/45 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center gap-1.5 no-print p-2">
+                                {savingRotationId === `${viewingInspection.id}-after-0` ? (
+                                  <span className="text-[10px] text-white font-extrabold animate-pulse bg-black/50 px-2 py-1 rounded">
+                                    Salvando rotação...
+                                  </span>
+                                ) : (
+                                  <div className="flex items-center gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={() => handleRotatePhoto(viewingInspection, "after", 0, "left")}
+                                      className="p-1.5 bg-white/90 hover:bg-white text-gray-800 rounded-full shadow hover:scale-110 transition cursor-pointer flex items-center justify-center"
+                                      title="Girar para esquerda"
+                                    >
+                                      <span className="text-sm font-bold">↺</span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleRotatePhoto(viewingInspection, "after", 0, "right")}
+                                      className="p-1.5 bg-white/90 hover:bg-white text-gray-800 rounded-full shadow hover:scale-110 transition cursor-pointer flex items-center justify-center"
+                                      title="Girar para direita"
+                                    >
+                                      <span className="text-sm font-bold">↻</span>
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                          {/* Mobile persistent controls */}
+                          {currentUser?.perfil !== "visitante" && (
+                            <div className="flex items-center gap-2 mt-1.5 no-print md:hidden">
+                              {savingRotationId === `${viewingInspection.id}-after-0` ? (
+                                <span className="text-[9px] text-orange-500 font-bold animate-pulse">
+                                  Salvando rotação...
+                                </span>
+                              ) : (
+                                <>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleRotatePhoto(viewingInspection, "after", 0, "left")}
+                                    className="px-2 py-1 bg-gray-100 hover:bg-gray-200 text-gray-700 text-[10px] font-bold rounded flex items-center gap-0.5"
+                                  >
+                                    ↺ Esq
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleRotatePhoto(viewingInspection, "after", 0, "right")}
+                                    className="px-2 py-1 bg-gray-100 hover:bg-gray-200 text-gray-700 text-[10px] font-bold rounded flex items-center gap-0.5"
+                                  >
+                                    ↻ Dir
+                                  </button>
+                                </>
+                              )}
+                            </div>
+                          )}
                         </div>
                       </div>
                     )}
@@ -650,8 +1010,71 @@ export default function HistoricoView({
                 </h4>
                 <div className="grid grid-cols-2 gap-2">
                   {galleryInspection.fotosAntes.map((img, idx) => (
-                    <div key={idx} className="aspect-video rounded border overflow-hidden bg-gray-50">
-                      <img src={img} alt="Antes" className="w-full h-full object-cover" />
+                    <div key={idx} className="flex flex-col items-center w-full">
+                      <div className="aspect-video rounded border overflow-hidden bg-gray-50 relative group w-full">
+                        <ResolvedImage
+                          src={img}
+                          rotation={galleryInspection.rotacoesFotosAntes ? galleryInspection.rotacoesFotosAntes[idx] || 0 : 0}
+                          alt="Antes"
+                          className="w-full h-full object-cover"
+                        />
+                        {/* Desktop hover controls */}
+                        {currentUser?.perfil !== "visitante" && (
+                          <div className="absolute inset-0 bg-black/45 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center gap-1.5 no-print p-2">
+                            {savingRotationId === `${galleryInspection.id}-before-${idx}` ? (
+                              <span className="text-[10px] text-white font-extrabold animate-pulse bg-black/50 px-2 py-1 rounded">
+                                Salvando rotação...
+                              </span>
+                            ) : (
+                              <div className="flex items-center gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => handleRotatePhoto(galleryInspection, "before", idx, "left")}
+                                  className="p-1.5 bg-white/90 hover:bg-white text-gray-800 rounded-full shadow hover:scale-110 transition cursor-pointer flex items-center justify-center"
+                                  title="Girar para esquerda"
+                                >
+                                  <span className="text-sm font-bold">↺</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleRotatePhoto(galleryInspection, "before", idx, "right")}
+                                  className="p-1.5 bg-white/90 hover:bg-white text-gray-800 rounded-full shadow hover:scale-110 transition cursor-pointer flex items-center justify-center"
+                                  title="Girar para direita"
+                                >
+                                  <span className="text-sm font-bold">↻</span>
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                      {/* Mobile persistent controls */}
+                      {currentUser?.perfil !== "visitante" && (
+                        <div className="flex items-center gap-2 mt-1.5 no-print md:hidden">
+                          {savingRotationId === `${galleryInspection.id}-before-${idx}` ? (
+                            <span className="text-[9px] text-orange-500 font-bold animate-pulse">
+                              Salvando rotação...
+                            </span>
+                          ) : (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => handleRotatePhoto(galleryInspection, "before", idx, "left")}
+                                className="px-2 py-1 bg-gray-100 hover:bg-gray-200 text-gray-700 text-[10px] font-bold rounded flex items-center gap-0.5"
+                              >
+                                ↺ Esq
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleRotatePhoto(galleryInspection, "before", idx, "right")}
+                                className="px-2 py-1 bg-gray-100 hover:bg-gray-200 text-gray-700 text-[10px] font-bold rounded flex items-center gap-0.5"
+                              >
+                                ↻ Dir
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      )}
                     </div>
                   ))}
                   {galleryInspection.fotosAntes.length === 0 && (
@@ -669,8 +1092,71 @@ export default function HistoricoView({
                 </h4>
                 <div className="grid grid-cols-2 gap-2">
                   {galleryInspection.fotosDepois.map((img, idx) => (
-                    <div key={idx} className="aspect-video rounded border overflow-hidden bg-gray-50">
-                      <img src={img} alt="Depois" className="w-full h-full object-cover" />
+                    <div key={idx} className="flex flex-col items-center w-full">
+                      <div className="aspect-video rounded border overflow-hidden bg-gray-50 relative group w-full">
+                        <ResolvedImage
+                          src={img}
+                          rotation={galleryInspection.rotacoesFotosDepois ? galleryInspection.rotacoesFotosDepois[idx] || 0 : 0}
+                          alt="Depois"
+                          className="w-full h-full object-cover"
+                        />
+                        {/* Desktop hover controls */}
+                        {currentUser?.perfil !== "visitante" && (
+                          <div className="absolute inset-0 bg-black/45 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center gap-1.5 no-print p-2">
+                            {savingRotationId === `${galleryInspection.id}-after-${idx}` ? (
+                              <span className="text-[10px] text-white font-extrabold animate-pulse bg-black/50 px-2 py-1 rounded">
+                                Salvando rotação...
+                              </span>
+                            ) : (
+                              <div className="flex items-center gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => handleRotatePhoto(galleryInspection, "after", idx, "left")}
+                                  className="p-1.5 bg-white/90 hover:bg-white text-gray-800 rounded-full shadow hover:scale-110 transition cursor-pointer flex items-center justify-center"
+                                  title="Girar para esquerda"
+                                >
+                                  <span className="text-sm font-bold">↺</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleRotatePhoto(galleryInspection, "after", idx, "right")}
+                                  className="p-1.5 bg-white/90 hover:bg-white text-gray-800 rounded-full shadow hover:scale-110 transition cursor-pointer flex items-center justify-center"
+                                  title="Girar para direita"
+                                >
+                                  <span className="text-sm font-bold">↻</span>
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                      {/* Mobile persistent controls */}
+                      {currentUser?.perfil !== "visitante" && (
+                        <div className="flex items-center gap-2 mt-1.5 no-print md:hidden">
+                          {savingRotationId === `${galleryInspection.id}-after-${idx}` ? (
+                            <span className="text-[9px] text-orange-500 font-bold animate-pulse">
+                              Salvando rotação...
+                            </span>
+                          ) : (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => handleRotatePhoto(galleryInspection, "after", idx, "left")}
+                                className="px-2 py-1 bg-gray-100 hover:bg-gray-200 text-gray-700 text-[10px] font-bold rounded flex items-center gap-0.5"
+                              >
+                                ↺ Esq
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleRotatePhoto(galleryInspection, "after", idx, "right")}
+                                className="px-2 py-1 bg-gray-100 hover:bg-gray-200 text-gray-700 text-[10px] font-bold rounded flex items-center gap-0.5"
+                              >
+                                ↻ Dir
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      )}
                     </div>
                   ))}
                   {galleryInspection.fotosDepois.length === 0 && (

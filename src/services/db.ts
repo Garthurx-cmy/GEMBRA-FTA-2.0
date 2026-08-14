@@ -5,14 +5,121 @@
  */
 import {
   Inspection, Supervisor, Area, Contract, SystemConfig, UserProfile,
-  AppNotification, AuthorizedEmail, InspectionStatus
+  AppNotification, AuthorizedEmail, InspectionStatus, getTipoLancamento
 } from "../types";
-import { auth, db, storage, hasFirebase } from "./firebase";
+import { auth, db, hasFirebase } from "./firebase";
 import {
-  collection, doc, setDoc, updateDoc, deleteDoc, onSnapshot,
-  serverTimestamp, getDocs, query, where, writeBatch
+  collection, doc,
+  setDoc as fbSetDoc,
+  updateDoc as fbUpdateDoc,
+  deleteDoc as fbDeleteDoc,
+  onSnapshot as fbOnSnapshot,
+  serverTimestamp, getDocs as fbGetDocs, query, where,
+  writeBatch as fbWriteBatch,
+  orderBy, limit, startAfter, getDoc as fbGetDoc
 } from "firebase/firestore";
-import { ref, uploadString, getDownloadURL, deleteObject } from "firebase/storage";
+
+// Instrumenting Read operations
+const getDoc = async (ref: any): Promise<any> => {
+  const path = ref && typeof ref.path === "string" ? ref.path : "unknown-path";
+  const horario = new Date().toISOString();
+  console.trace("[FIRESTORE READ]", {
+    operacao: "getDoc",
+    colecao: path,
+    origem: "DBService",
+    horario,
+    motivo: "Busca de documento único",
+    componente: "DBService"
+  });
+  return fbGetDoc(ref);
+};
+
+const getDocs = async (ref: any): Promise<any> => {
+  let path = "unknown-path";
+  if (ref) {
+    if (typeof ref.path === "string") {
+      path = ref.path;
+    } else if (ref._query && ref._query.path) {
+      path = ref._query.path.toString();
+    }
+  }
+  const horario = new Date().toISOString();
+  console.trace("[FIRESTORE READ]", {
+    operacao: "getDocs",
+    colecao: path,
+    origem: "DBService",
+    horario,
+    motivo: "Busca de coleção / consulta",
+    componente: "DBService"
+  });
+  return fbGetDocs(ref);
+};
+
+const onSnapshot = (ref: any, ...args: any[]) => {
+  let path = "unknown-path";
+  if (ref) {
+    if (typeof ref.path === "string") {
+      path = ref.path;
+    } else if (ref._query && ref._query.path) {
+      path = ref._query.path.toString();
+    }
+  }
+  const horario = new Date().toISOString();
+  console.trace("[FIRESTORE READ - LISTENER CREATED]", {
+    operacao: "onSnapshot",
+    colecao: path,
+    origem: "DBService",
+    horario,
+    motivo: "Sincronização em tempo real",
+    componente: "DBService"
+  });
+
+  const unsubscribe = (fbOnSnapshot as any)(ref, ...args);
+
+  return () => {
+    console.trace("[FIRESTORE READ - LISTENER CLOSED]", {
+      operacao: "unsubscribe",
+      colecao: path,
+      origem: "DBService",
+      horario: new Date().toISOString(),
+      componente: "DBService"
+    });
+    unsubscribe();
+  };
+};
+
+// Trace helper for writes in development
+const setDoc = async (ref: any, data: any, options?: any) => {
+  if (process.env.NODE_ENV !== "production") {
+    const path = ref && typeof ref.path === "string" ? ref.path : "unknown-path";
+    console.trace("[FIRESTORE WRITE]", path, "setDoc", data);
+  }
+  return fbSetDoc(ref, data, options);
+};
+
+const updateDoc = async (ref: any, data: any) => {
+  if (process.env.NODE_ENV !== "production") {
+    const path = ref && typeof ref.path === "string" ? ref.path : "unknown-path";
+    console.trace("[FIRESTORE WRITE]", path, "updateDoc", data);
+  }
+  return fbUpdateDoc(ref, data);
+};
+
+const deleteDoc = async (ref: any) => {
+  if (process.env.NODE_ENV !== "production") {
+    const path = ref && typeof ref.path === "string" ? ref.path : "unknown-path";
+    console.trace("[FIRESTORE WRITE]", path, "deleteDoc");
+  }
+  return fbDeleteDoc(ref);
+};
+
+const writeBatch = (firestoreInstance: any) => {
+  const batch = fbWriteBatch(firestoreInstance);
+  if (process.env.NODE_ENV !== "production") {
+    console.trace("[FIRESTORE WRITE] Batch created");
+  }
+  return batch;
+};
 
 const DEFAULT_CONFIG: SystemConfig = {
   logoUrl: "/logo-fta.png",
@@ -21,12 +128,12 @@ const DEFAULT_CONFIG: SystemConfig = {
   temaEscuro: false,
   responsavelAssinaturaNome: "Jhonata Gonçalves dos Santos",
   responsavelAssinaturaCargo: "Gerente Operacional dos Contratos",
-  tiposInspecao: ["DSS", "AR", "LVCC", "DIAL / Desvio Comportamental", "Desvio Estrutural", "Notificação", "Interdição", "Presença em Campo"],
+  tiposInspecao: ["DSS", "AR", "LVCC", "DIAL", "Desvio Comportamental", "Desvio Estrutural", "Notificação", "Interdição", "Presença em Campo"],
   processosChecklist: [
     { id: "dss", nome: "DSS", classificacaoPadrao: "DSS" },
     { id: "ar", nome: "AR", classificacaoPadrao: "AR" },
     { id: "lvcc", nome: "LVCC", classificacaoPadrao: "LVCC" },
-    { id: "dial", nome: "DIAL", classificacaoPadrao: "DIAL / Desvio Comportamental" },
+    { id: "dial", nome: "DIAL", classificacaoPadrao: "DIAL" },
     { id: "presenca", nome: "Presença em Campo", classificacaoPadrao: "Presença em Campo" }
   ]
 };
@@ -47,8 +154,9 @@ class DBService {
   private notifications: AppNotification[] = [];
   private deletedNames: Record<string, string> = {};
   private authorizedEmails: AuthorizedEmail[] = [];
-  private unsubscribes: (() => void)[] = [];
-  private started = false;
+  private syncActive = false;
+  private unsubscribers: Array<() => void> = [];
+  private metadataPreloaded = false;
 
   private convert(value: any): any {
     if (Array.isArray(value)) return value.map(v => this.convert(v));
@@ -63,47 +171,297 @@ class DBService {
     window.dispatchEvent(new CustomEvent("gemba_fta_db_update", { detail: { key } }));
   }
 
-  startSync(currentProfile?: UserProfile): void {
-    if (this.started || !hasFirebase || !db) return;
-    this.started = true;
-    const syncCollection = <T,>(name: string, setter: (items: T[]) => void, sort?: (a: T, b: T) => number) => {
-      this.unsubscribes.push(onSnapshot(collection(db, name), snap => {
-        const list = snap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as T));
-        if (sort) list.sort(sort);
-        setter(list);
-        this.emit(name);
-      }, err => console.error(`Falha ao sincronizar ${name}:`, err)));
-    };
+  startSync(currentProfile?: UserProfile, activeTab?: string): void {
+    if (this.syncActive || !hasFirebase || !db) return;
+    this.syncActive = true;
 
-    this.unsubscribes.push(onSnapshot(doc(db, "settings", "config"), snap => {
+    const currentTab = activeTab || "dashboard";
+    const isAdmin = currentProfile?.perfil === "Desenvolvedor/Admin" || currentProfile?.perfil === "Administrador";
+
+    // 1. Settings (config) - always needed when active
+    this.unsubscribers.push(onSnapshot(doc(db, "settings", "config"), snap => {
       this.config = snap.exists() ? ({ ...DEFAULT_CONFIG, ...this.convert(snap.data()) } as SystemConfig) : DEFAULT_CONFIG;
       this.emit("config");
     }, err => console.error("Falha ao sincronizar configurações:", err)));
 
-    syncCollection<Inspection>("inspections", v => this.inspections = v, (a, b) => new Date(b.data).getTime() - new Date(a.data).getTime());
-    syncCollection<Supervisor>("supervisors", v => this.supervisors = v);
-    syncCollection<Area>("areas", v => this.areas = v);
-    syncCollection<Contract>("contracts", v => this.contracts = v);
-    const isAdmin = currentProfile?.perfil === "Desenvolvedor/Admin" || currentProfile?.perfil === "Administrador";
-    if (isAdmin) syncCollection<UserProfile>("users", v => this.users = v);
-    syncCollection<AppNotification>("notifications", v => this.notifications = v, (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-    if (isAdmin) syncCollection<AuthorizedEmail>("authorized_emails", v => this.authorizedEmails = v);
-    this.unsubscribes.push(onSnapshot(collection(db, "deleted_names"), snap => {
+    // 2. Deleted Names - always needed to resolve deleted item labels
+    this.unsubscribers.push(onSnapshot(collection(db, "deleted_names"), snap => {
       this.deletedNames = Object.fromEntries(snap.docs.map(d => [d.id, d.data().name || "Registro removido"]));
       this.emit("deleted_names");
-    }));
+    }, err => console.error("Falha ao sincronizar nomes removidos:", err)));
+
+    // 3. Notifications - always needed for alert badge
+    this.unsubscribers.push(onSnapshot(query(collection(db, "notifications"), orderBy("createdAt", "desc"), limit(20)), snap => {
+      this.notifications = snap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as AppNotification));
+      this.emit("notifications");
+    }, err => console.error("Falha ao sincronizar notificações:", err)));
+
+    // 4. Page/Tab Specific Sourcing
+    if (currentTab === "dashboard" || currentTab === "farol" || currentTab === "ranking") {
+      // Dashboard needs inspections
+      this.unsubscribers.push(onSnapshot(query(collection(db, "inspections"), orderBy("data", "desc"), limit(1000)), snap => {
+        this.inspections = snap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as Inspection));
+        this.emit("inspections");
+      }, err => console.error("Falha ao sincronizar inspeções do Dashboard:", err)));
+    } else if (currentTab === "historico" || currentTab === "relatorios" || currentTab === "lancar") {
+      // These pages need supervisors, areas, and contracts for selects and display
+      this.unsubscribers.push(onSnapshot(collection(db, "supervisors"), snap => {
+        this.supervisors = snap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as Supervisor));
+        this.emit("supervisors");
+      }, err => console.error("Falha ao sincronizar supervisores:", err)));
+
+      this.unsubscribers.push(onSnapshot(collection(db, "areas"), snap => {
+        this.areas = snap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as Area));
+        this.emit("areas");
+      }, err => console.error("Falha ao sincronizar áreas:", err)));
+
+      this.unsubscribers.push(onSnapshot(collection(db, "contracts"), snap => {
+        this.contracts = snap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as Contract));
+        this.emit("contracts");
+      }, err => console.error("Falha ao sincronizar contratos:", err)));
+    } else if (currentTab === "configuracoes") {
+      // Configuracoes page needs admin tables
+      this.unsubscribers.push(onSnapshot(collection(db, "supervisors"), snap => {
+        this.supervisors = snap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as Supervisor));
+        this.emit("supervisors");
+      }, err => console.error("Falha ao sincronizar supervisores:", err)));
+
+      this.unsubscribers.push(onSnapshot(collection(db, "areas"), snap => {
+        this.areas = snap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as Area));
+        this.emit("areas");
+      }, err => console.error("Falha ao sincronizar áreas:", err)));
+
+      this.unsubscribers.push(onSnapshot(collection(db, "contracts"), snap => {
+        this.contracts = snap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as Contract));
+        this.emit("contracts");
+      }, err => console.error("Falha ao sincronizar contratos:", err)));
+
+      if (isAdmin) {
+        this.unsubscribers.push(onSnapshot(collection(db, "users"), snap => {
+          this.users = snap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as UserProfile));
+          this.emit("users");
+        }, err => console.error("Falha ao sincronizar usuários:", err)));
+
+        this.unsubscribers.push(onSnapshot(collection(db, "authorized_emails"), snap => {
+          this.authorizedEmails = snap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as AuthorizedEmail));
+          this.emit("authorized_emails");
+        }, err => console.error("Falha ao sincronizar e-mails autorizados:", err)));
+      }
+    }
   }
 
-  stopSync(): void {
-    this.unsubscribes.forEach(u => u());
-    this.unsubscribes = [];
-    this.started = false;
-    this.inspections = []; this.supervisors = []; this.areas = []; this.contracts = [];
-    this.users = []; this.notifications = []; this.authorizedEmails = [];
+  stopSync(clearData: boolean = false): void {
+    this.unsubscribers.forEach(u => u());
+    this.unsubscribers = [];
+    this.syncActive = false;
+    if (clearData) {
+      this.inspections = [];
+      this.supervisors = [];
+      this.areas = [];
+      this.contracts = [];
+      this.users = [];
+      this.notifications = [];
+      this.authorizedEmails = [];
+      this.metadataPreloaded = false;
+    }
+  }
+
+  async getPaginatedInspections(options: {
+    limit: number;
+    startAfterDocId?: string | null;
+    filters?: {
+      searchTerm?: string;
+      supervisorId?: string;
+      areaId?: string;
+      contratoId?: string;
+      status?: string;
+      potencial?: string;
+      data?: string;
+      tipo?: string;
+    };
+  }) {
+    this.assertFirebase();
+    const f = options.filters || {};
+    
+    try {
+      // Build optimized query with direct Firestore filters
+      let q = query(collection(db, "inspections"), orderBy("data", "desc"));
+      
+      if (f.supervisorId && f.supervisorId !== "all" && f.supervisorId !== "") {
+        q = query(q, where("supervisorId", "==", f.supervisorId));
+      }
+      if (f.areaId && f.areaId !== "all" && f.areaId !== "") {
+        q = query(q, where("areaId", "==", f.areaId));
+      }
+      if (f.contratoId && f.contratoId !== "all" && f.contratoId !== "") {
+        q = query(q, where("contratoId", "==", f.contratoId));
+      }
+      if (f.status && f.status !== "all" && f.status !== "") {
+        q = query(q, where("status", "==", f.status));
+      }
+      if (f.potencial && f.potencial !== "all" && f.potencial !== "") {
+        q = query(q, where("potencial", "==", f.potencial));
+      }
+      if (f.data) {
+        q = query(q, where("data", "==", f.data));
+      }
+
+      if (options.startAfterDocId) {
+        const docSnap = await getDoc(doc(db, "inspections", options.startAfterDocId));
+        if (docSnap.exists()) {
+          q = query(q, startAfter(docSnap));
+        }
+      }
+
+      q = query(q, limit(options.limit));
+      const snap = await getDocs(q);
+      const list = snap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as Inspection));
+      
+      let filteredList = list;
+      if (f.tipo && f.tipo !== "all" && f.tipo !== "") {
+        filteredList = list.filter(item => getTipoLancamento(item.atividade, item.tipo) === f.tipo);
+      }
+      if (f.searchTerm) {
+        const term = f.searchTerm.toLowerCase();
+        filteredList = filteredList.filter(item => 
+          item.descricao.toLowerCase().includes(term) ||
+          item.acaoCorretiva.toLowerCase().includes(term) ||
+          item.responsavel.toLowerCase().includes(term) ||
+          (item.observacoes && item.observacoes.toLowerCase().includes(term)) ||
+          item.id.toLowerCase().includes(term)
+        );
+      }
+
+      return {
+        items: filteredList,
+        lastDocId: snap.docs.length > 0 ? snap.docs[snap.docs.length - 1].id : null,
+        hasMore: snap.docs.length === options.limit
+      };
+    } catch (err) {
+      console.warn("Firestore index query failed, using safe fallback client-side filtering:", err);
+      
+      // Fallback query: orderBy date and limit 300 to do filtering client-side
+      let q = query(collection(db, "inspections"), orderBy("data", "desc"), limit(300));
+      const snap = await getDocs(q);
+      let list = snap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as Inspection));
+      
+      if (f.supervisorId && f.supervisorId !== "all" && f.supervisorId !== "") {
+        list = list.filter(item => item.supervisorId === f.supervisorId);
+      }
+      if (f.areaId && f.areaId !== "all" && f.areaId !== "") {
+        list = list.filter(item => item.areaId === f.areaId);
+      }
+      if (f.contratoId && f.contratoId !== "all" && f.contratoId !== "") {
+        list = list.filter(item => item.contratoId === f.contratoId);
+      }
+      if (f.status && f.status !== "all" && f.status !== "") {
+        list = list.filter(item => item.status === f.status);
+      }
+      if (f.potencial && f.potencial !== "all" && f.potencial !== "") {
+        list = list.filter(item => item.potencial === f.potencial);
+      }
+      if (f.data) {
+        list = list.filter(item => item.data === f.data);
+      }
+      if (f.tipo && f.tipo !== "all" && f.tipo !== "") {
+        list = list.filter(item => getTipoLancamento(item.atividade, item.tipo) === f.tipo);
+      }
+      if (f.searchTerm) {
+        const term = f.searchTerm.toLowerCase();
+        list = list.filter(item => 
+          item.descricao.toLowerCase().includes(term) ||
+          item.acaoCorretiva.toLowerCase().includes(term) ||
+          item.responsavel.toLowerCase().includes(term) ||
+          (item.observacoes && item.observacoes.toLowerCase().includes(term)) ||
+          item.id.toLowerCase().includes(term)
+        );
+      }
+
+      let startIndex = 0;
+      if (options.startAfterDocId) {
+        const foundIdx = list.findIndex(item => item.id === options.startAfterDocId);
+        if (foundIdx !== -1) {
+          startIndex = foundIdx + 1;
+        }
+      }
+
+      const paginatedList = list.slice(startIndex, startIndex + options.limit);
+      return {
+        items: paginatedList,
+        lastDocId: paginatedList.length > 0 ? paginatedList[paginatedList.length - 1].id : null,
+        hasMore: startIndex + options.limit < list.length
+      };
+    }
+  }
+
+  async getInspectionById(id: string): Promise<Inspection | null> {
+    this.assertFirebase();
+    const cached = this.inspections.find(i => i.id === id);
+    if (cached) return cached;
+    
+    const docSnap = await getDoc(doc(db, "inspections", id));
+    if (docSnap.exists()) {
+      return { id: docSnap.id, ...this.convert(docSnap.data()) } as Inspection;
+    }
+    return null;
+  }
+
+  async preloadMetadata(): Promise<void> {
+    if (!hasFirebase || !db) return;
+    if (this.metadataPreloaded) return;
+    this.metadataPreloaded = true;
+    try {
+      // 1. Preload settings once
+      const configSnap = await getDoc(doc(db, "settings", "config"));
+      if (configSnap.exists()) {
+        this.config = { ...DEFAULT_CONFIG, ...this.convert(configSnap.data()) } as SystemConfig;
+        this.emit("config");
+      }
+
+      // 2. Preload deleted names once
+      const deletedSnap = await getDocs(collection(db, "deleted_names"));
+      this.deletedNames = Object.fromEntries(deletedSnap.docs.map(d => [d.id, d.data().name || "Registro removido"]));
+      this.emit("deleted_names");
+
+      // 3. Preload supervisors once if empty
+      if (this.supervisors.length === 0) {
+        const supervisorsSnap = await getDocs(collection(db, "supervisors"));
+        this.supervisors = supervisorsSnap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as Supervisor));
+        this.emit("supervisors");
+      }
+
+      // 4. Preload areas once if empty
+      if (this.areas.length === 0) {
+        const areasSnap = await getDocs(collection(db, "areas"));
+        this.areas = areasSnap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as Area));
+        this.emit("areas");
+      }
+
+      // 5. Preload contracts once if empty
+      if (this.contracts.length === 0) {
+        const contractsSnap = await getDocs(collection(db, "contracts"));
+        this.contracts = contractsSnap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as Contract));
+        this.emit("contracts");
+      }
+    } catch (err) {
+      console.warn("Falha ao pré-carregar metadados em segundo plano:", err);
+      this.metadataPreloaded = false; // reset in case of error so it can retry
+    }
   }
 
   getInspections = () => [...this.inspections];
-  getSupervisors = () => [...this.supervisors];
+  getSupervisors = () => {
+    return this.supervisors.map(sup => {
+      if (this.isJhonata(sup)) {
+        return {
+          ...sup,
+          metaSemanal: 2,
+          metaMensal: 8
+        };
+      }
+      return sup;
+    });
+  };
   getAreas = () => [...this.areas];
   getContracts = () => [...this.contracts];
   getUsers = () => [...this.users];
@@ -114,17 +472,6 @@ class DBService {
 
   private assertFirebase() {
     if (!hasFirebase || !db) throw new Error("Firebase não está configurado.");
-  }
-
-  private async uploadImages(inspectionId: string, values: string[], folder: "antes" | "depois"): Promise<string[]> {
-    if (!storage) throw new Error("Firebase Storage não está configurado.");
-    return Promise.all(values.map(async (value, index) => {
-      if (!value.startsWith("data:")) return value;
-      const path = `inspections/${inspectionId}/${folder}/${Date.now()}_${index}.jpg`;
-      const fileRef = ref(storage, path);
-      await uploadString(fileRef, value, "data_url");
-      return getDownloadURL(fileRef);
-    }));
   }
 
   private async addAuditLog(action: string, entity: string, entityId: string, details?: Record<string, unknown>) {
@@ -143,12 +490,10 @@ class DBService {
   async saveInspection(inspection: Inspection): Promise<void> {
     this.assertFirebase();
     const isNew = !this.inspections.some(i => i.id === inspection.id);
-    const fotosAntes = await this.uploadImages(inspection.id, inspection.fotosAntes || [], "antes");
-    const fotosDepois = await this.uploadImages(inspection.id, inspection.fotosDepois || [], "depois");
     const payload: any = {
       ...inspection,
-      fotosAntes,
-      fotosDepois,
+      fotosAntes: inspection.fotosAntes || [],
+      fotosDepois: inspection.fotosDepois || [],
       createdAt: inspection.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       atualizadoEm: serverTimestamp()
@@ -162,12 +507,6 @@ class DBService {
   async deleteInspection(id: string): Promise<void> {
     this.assertFirebase();
     const item = this.inspections.find(i => i.id === id);
-    if (item) {
-      const urls = [...(item.fotosAntes || []), ...(item.fotosDepois || [])];
-      await Promise.all(urls.filter(u => u.includes("firebasestorage")).map(async u => {
-        try { await deleteObject(ref(storage, u)); } catch { /* arquivo já removido ou URL externa */ }
-      }));
-    }
     await deleteDoc(doc(db, "inspections", id));
     await this.addAuditLog("delete", "inspection", id, { supervisorId: item?.supervisorId || "" });
   }
@@ -304,6 +643,21 @@ class DBService {
       result[rule.col] = removed;
     }
     return result;
+  }
+
+  private isJhonata(sup?: any): boolean {
+    if (!sup) return false;
+    const email = String(sup.email || "").trim().toLowerCase();
+    const nome = String(sup.nome || "").toLowerCase();
+    const id = String(sup.id || "").toLowerCase();
+    return (
+      email === "j.santos@grupofta.com.br" ||
+      email === "jhonata.santos@grupofta.com.br" ||
+      email.startsWith("jhonata") ||
+      id.includes("j_santos") ||
+      id.includes("jhonata") ||
+      (nome.includes("jhonata") && (nome.includes("santos") || nome.includes("gonçalves") || nome.includes("goncalves")))
+    );
   }
 }
 

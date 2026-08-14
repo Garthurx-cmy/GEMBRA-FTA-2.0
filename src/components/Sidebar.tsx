@@ -32,14 +32,18 @@ export default function Sidebar({ activeTab, setActiveTab, config, currentUser, 
 
   const menuPrincipal = [
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
-    { id: "lancar", label: "Lançar Inspeção", icon: PlusCircle },
+    ...(currentUser?.perfil !== "visitante"
+      ? [{ id: "lancar", label: "Lançar Inspeção", icon: PlusCircle }]
+      : []),
     { id: "historico", label: "Histórico", icon: ClipboardList },
   ];
 
   const menuAnalise = [
     { id: "relatorios", label: "Relatórios", icon: FileBarChart },
     { id: "ranking", label: "Ranking", icon: Trophy },
-    { id: "exportacoes", label: "Exportações", icon: Download },
+    ...(currentUser?.perfil !== "visitante"
+      ? [{ id: "exportacoes", label: "Exportações", icon: Download }]
+      : []),
     ...(currentUser?.perfil === "Desenvolvedor/Admin" || currentUser?.perfil === "Administrador"
       ? [{ id: "configuracoes", label: "Configurações", icon: Settings }]
       : []),

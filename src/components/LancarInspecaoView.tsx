@@ -28,6 +28,8 @@ import {
   X,
   UploadCloud
 } from "lucide-react";
+import { convertHeicFileToJpegDataUrl } from "../utils/heicHelper";
+
 
 interface LancarInspecaoViewProps {
   supervisors: Supervisor[];
@@ -41,6 +43,64 @@ interface LancarInspecaoViewProps {
 }
 
 const TIPO_LANCAMENTO_OPTIONS = Object.keys(TIPO_LANCAMENTO_CONFIG);
+
+function getBase64Size(dataUrl: string): number {
+  if (!dataUrl || !dataUrl.includes(",")) return 0;
+  const commaIndex = dataUrl.indexOf(",");
+  const base64Str = dataUrl.substring(commaIndex + 1);
+  const padding = base64Str.endsWith("==") ? 2 : base64Str.endsWith("=") ? 1 : 0;
+  return (base64Str.length * 3) / 4 - padding;
+}
+
+async function compressImage(dataUrl: string): Promise<string> {
+  if (!dataUrl.startsWith("data:")) return dataUrl;
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      let width = img.width;
+      let height = img.height;
+      const maxDim = 800;
+
+      if (width > maxDim || height > maxDim) {
+        if (width > height) {
+          height = Math.round((height * maxDim) / width);
+          width = maxDim;
+        } else {
+          width = Math.round((width * maxDim) / height);
+          height = maxDim;
+        }
+      }
+
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        resolve(dataUrl);
+        return;
+      }
+
+      ctx.drawImage(img, 0, 0, width, height);
+
+      let quality = 0.45;
+      let compressedDataUrl = canvas.toDataURL("image/jpeg", quality);
+      const maxSizeBytes = 90 * 1024; // 90 KB
+
+      while (getBase64Size(compressedDataUrl) > maxSizeBytes && quality > 0.05) {
+        quality -= 0.05;
+        compressedDataUrl = canvas.toDataURL("image/jpeg", quality);
+      }
+
+      resolve(compressedDataUrl);
+    };
+
+    img.onerror = (err) => {
+      reject(err);
+    };
+
+    img.src = dataUrl;
+  });
+}
 
 export default function LancarInspecaoView({
   supervisors,
@@ -74,24 +134,26 @@ export default function LancarInspecaoView({
   const [fotosAntes, setFotosAntes] = useState<string[]>([]);
   const [fotosDepois, setFotosDepois] = useState<string[]>([]);
 
-  // Validation alerts
+  // Validation alerts and processing states
   const [error, setError] = useState("");
+  const [isSaving, setIsSaving] = useState(false);
+  const [compressingStatus, setCompressingStatus] = useState("");
 
   // Load editing inspection data if provided
   useEffect(() => {
     if (editingInspection) {
-      setData(editingInspection.data);
-      setSupervisorId(editingInspection.supervisorId);
-      setAreaId(editingInspection.areaId);
-      setContratoId(editingInspection.contratoId);
-      setAtividade(editingInspection.atividade);
-      setTipo(editingInspection.tipo);
-      setPotencial(editingInspection.potencial);
-      setDescricao(editingInspection.descricao);
-      setAcaoCorretiva(editingInspection.acaoCorretiva);
-      setResponsavel(editingInspection.responsavel);
-      setPrazo(editingInspection.prazo);
-      setStatus(editingInspection.status);
+      setData(editingInspection.data || "");
+      setSupervisorId(editingInspection.supervisorId || "");
+      setAreaId(editingInspection.areaId || "");
+      setContratoId(editingInspection.contratoId || "");
+      setAtividade(editingInspection.atividade || "");
+      setTipo(editingInspection.tipo || "");
+      setPotencial(editingInspection.potencial || "LEVE" as any);
+      setDescricao(editingInspection.descricao || "");
+      setAcaoCorretiva(editingInspection.acaoCorretiva || "");
+      setResponsavel(editingInspection.responsavel || "");
+      setPrazo(editingInspection.prazo || "");
+      setStatus(editingInspection.status || "ABERTO" as any);
       setObservacoes(editingInspection.observacoes || "");
       setFotosAntes(editingInspection.fotosAntes || []);
       setFotosDepois(editingInspection.fotosDepois || []);
@@ -140,7 +202,7 @@ export default function LancarInspecaoView({
     return getTipoLancamento(atividade, tipo);
   };
 
-  // Handle Photo uploads (convert files to base64 strings)
+  // Handle Photo uploads (convert files to base64 strings with on-the-fly progressive compression)
   const handlePhotoUpload = (e: React.ChangeEvent<HTMLInputElement>, type: "before" | "after") => {
     const files = e.target.files;
     if (!files) return;
@@ -154,26 +216,59 @@ export default function LancarInspecaoView({
     }
     const fileList = (Array.from(files) as File[]).slice(0, remaining);
     if (files.length > remaining) alert(`Somente ${remaining} foto(s) adicional(is) serão anexadas.`);
-    fileList.forEach((file) => {
-      // Limit file size to 2MB for base64 storage limits safely
-      if (file.size > 5 * 1024 * 1024) {
-        alert(`O arquivo ${file.name} excede o limite de 5MB para upload.`);
-        return;
-      }
+    
+    setCompressingStatus("Processando imagens...");
+    setError("");
 
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        if (typeof reader.result === "string") {
-          const resultString = reader.result;
-          if (type === "before") {
-            setFotosAntes((prev) => [...prev, resultString]);
-          } else {
-            setFotosDepois((prev) => [...prev, resultString]);
-          }
+    let processedCount = 0;
+    fileList.forEach(async (file) => {
+      try {
+        let originalDataUrl = "";
+        const isHeicFile = file.type === "image/heic" || file.type === "image/heif" || file.name.toLowerCase().endsWith(".heic") || file.name.toLowerCase().endsWith(".heif");
+
+        if (isHeicFile) {
+          setCompressingStatus("Convertendo HEIC para JPEG...");
+          originalDataUrl = await convertHeicFileToJpegDataUrl(file);
+        } else {
+          originalDataUrl = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onloadend = () => {
+              if (typeof reader.result === "string") {
+                resolve(reader.result);
+              } else {
+                reject(new Error("Erro ao ler arquivo."));
+              }
+            };
+            reader.onerror = () => reject(reader.error || new Error("Erro ao ler arquivo."));
+            reader.readAsDataURL(file);
+          });
         }
-      };
-      reader.readAsDataURL(file);
+
+        setCompressingStatus("Comprimindo imagens...");
+        const compressed = await compressImage(originalDataUrl);
+
+        if (type === "before") {
+          setFotosAntes((prev) => {
+            const updated = [...prev, compressed];
+            return updated.slice(0, 3);
+          });
+        } else {
+          setFotosDepois((prev) => {
+            const updated = [...prev, compressed];
+            return updated.slice(0, 3);
+          });
+        }
+      } catch (err) {
+        console.error("Erro ao processar imagem:", err);
+        setError("Não foi possível processar esta foto.");
+      } finally {
+        processedCount++;
+        if (processedCount === fileList.length) {
+          setCompressingStatus("");
+        }
+      }
     });
+    e.target.value = "";
   };
 
   const removePhoto = (index: number, type: "before" | "after") => {
@@ -185,7 +280,7 @@ export default function LancarInspecaoView({
   };
 
   // Save/Submit Form handler
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
 
@@ -221,6 +316,13 @@ export default function LancarInspecaoView({
       }
     }
 
+    // Validate total photo sizes (maximum of 650 KB)
+    const totalPhotosSize = [...fotosAntes, ...fotosDepois].reduce((sum, img) => sum + getBase64Size(img), 0);
+    const maxPhotosSizeBytes = 650 * 1024;
+    if (totalPhotosSize > maxPhotosSizeBytes) {
+      return setError(`O tamanho total das fotos (${(totalPhotosSize / 1024).toFixed(1)} KB) excede o limite máximo permitido de 650 KB por inspeção. Por favor, remova alguma foto.`);
+    }
+
     const finalInspection: Inspection = {
       id: editingInspection?.id || "insp_" + Math.random().toString(36).substring(2, 9),
       data,
@@ -235,17 +337,34 @@ export default function LancarInspecaoView({
       responsavel: (isDSS || isPresenca) ? (supervisors.find(s => s.id === supervisorId)?.nome || "Supervisor") : responsavel,
       prazo: (isDSS || isPresenca) ? data : prazo,
       status: (isDSS || isPresenca) ? InspectionStatus.CONCLUIDO : status,
-      observacoes,
+      observacoes: observacoes || null,
       fotosAntes,
       fotosDepois: (isDSS || isPresenca) ? [] : fotosDepois,
-      temaDSS: isDSS ? temaDSS : undefined,
-      quantidadeParticipantes: (isDSS || isPresenca) ? Number(quantidadeParticipantes) : undefined,
-      dataConclusao: (!isDSS && !isPresenca && status === InspectionStatus.CONCLUIDO) ? dataConclusao : undefined,
+      armazenamentoFotos: "firestore-inline",
+      temaDSS: isDSS ? temaDSS : null,
+      quantidadeParticipantes: (isDSS || isPresenca) ? Number(quantidadeParticipantes) : null,
+      dataConclusao: (!isDSS && !isPresenca && status === InspectionStatus.CONCLUIDO) ? dataConclusao : null,
       createdAt: editingInspection?.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
 
-    onSave(finalInspection);
+    // Validate that the document size never exceeds 1 MiB of Firestore limit
+    const serializedDoc = JSON.stringify(finalInspection);
+    const docSizeBytes = serializedDoc.length;
+    const oneMiB = 1024 * 1024;
+    if (docSizeBytes > oneMiB) {
+      return setError("As fotos ultrapassaram o limite permitido. Remova uma foto ou escolha imagens menores.");
+    }
+
+    setIsSaving(true);
+    try {
+      await onSave(finalInspection);
+    } catch (err: any) {
+      console.error(err);
+      setError(err?.message || "Erro ao salvar a inspeção no banco de dados.");
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   const currentLaunchType = getSelectedValue();
@@ -701,20 +820,45 @@ export default function LancarInspecaoView({
         </div>
 
         {/* Buttons Action footer */}
-        <div className="border-t border-gray-100 pt-5 flex items-center justify-end gap-3.5">
-          <button
-            type="button"
-            onClick={onCancel}
-            className="px-4 py-2 bg-white hover:bg-gray-50 text-gray-700 text-xs font-bold rounded-lg border border-gray-200 shadow-sm transition cursor-pointer"
-          >
-            Cancelar
-          </button>
-          <button
-            type="submit"
-            className="flex items-center gap-1.5 px-6 py-2.5 bg-[#0B2E59] hover:bg-[#133e72] text-white text-xs font-black rounded-lg shadow shadow-blue-500/10 cursor-pointer"
-          >
-            <Save size={14} /> Salvar Registro GEMBA
-          </button>
+        <div className="border-t border-gray-100 pt-5 flex flex-col gap-3">
+          {error && (
+            <div className="p-3 bg-red-50 border-l-4 border-red-500 rounded-r-lg text-red-700 text-xs font-semibold flex items-center gap-2 self-end max-w-lg">
+              <AlertTriangle size={14} className="shrink-0 animate-pulse" />
+              <span>{error}</span>
+            </div>
+          )}
+          {compressingStatus && (
+            <div className="p-2 bg-blue-50 border-l-4 border-blue-500 rounded-r-lg text-blue-700 text-xs font-semibold flex items-center gap-2 self-end">
+              <div className="animate-spin rounded-full h-3.5 w-3.5 border-b-2 border-blue-700"></div>
+              <span>{compressingStatus}</span>
+            </div>
+          )}
+          <div className="flex items-center justify-end gap-3.5">
+            <button
+              type="button"
+              onClick={onCancel}
+              disabled={isSaving}
+              className="px-4 py-2 bg-white hover:bg-gray-50 text-gray-700 text-xs font-bold rounded-lg border border-gray-200 shadow-sm transition cursor-pointer disabled:opacity-50"
+            >
+              Cancelar
+            </button>
+            <button
+              type="submit"
+              disabled={isSaving || !!compressingStatus}
+              className="flex items-center gap-1.5 px-6 py-2.5 bg-[#0B2E59] hover:bg-[#133e72] text-white text-xs font-black rounded-lg shadow shadow-blue-500/10 cursor-pointer disabled:opacity-50"
+            >
+              {isSaving ? (
+                <>
+                  <div className="animate-spin rounded-full h-3 w-3 border-2 border-white border-t-transparent"></div>
+                  Salvando...
+                </>
+              ) : (
+                <>
+                  <Save size={14} /> Registrar GEMBA
+                </>
+              )}
+            </button>
+          </div>
         </div>
       </form>
     </div>

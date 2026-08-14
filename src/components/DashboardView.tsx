@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 import { dbService } from "../services/db";
 import {
   Inspection,
@@ -13,8 +13,18 @@ import {
   Potential,
   InspectionStatus,
   getTipoLancamento,
+  isDialInspection,
+  isDesvioComportamentalInspection,
   TIPO_LANCAMENTO_CONFIG
 } from "../types";
+import {
+  getNormalizedInspectionDate,
+  getInspectionMonthKey,
+  getEffectiveMonthKey,
+  getMonthOptions,
+  getUniqueMonthlyInspections,
+  getCanonicalInspectionCategory
+} from "../utils/inspectionUtils";
 import {
   Users,
   AlertTriangle,
@@ -37,12 +47,45 @@ import {
   Calendar
 } from "lucide-react";
 import FarolGembaView from "./FarolGembaView";
+import ResolvedImage from "./ResolvedImage";
+import { getInspectionScore } from "../utils/operational";
+import {
+  getOperationalWeek,
+  normalizeInspectionDate,
+  formatOperationalWeekLabel
+} from "../utils/operationalWeek";
+import {
+  ResponsiveContainer,
+  AreaChart,
+  Area as RechartsArea,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip as RechartsTooltip
+} from "recharts";
+
+const isJhonata = (sup?: Supervisor) => {
+  if (!sup) return false;
+  const email = String(sup.email || "").trim().toLowerCase();
+  const nome = String(sup.nome || "").toLowerCase();
+  const id = String(sup.id || "").toLowerCase();
+  return (
+    email === "j.santos@grupofta.com.br" ||
+    email === "jhonata.santos@grupofta.com.br" ||
+    email.startsWith("jhonata") ||
+    id.includes("j_santos") ||
+    id.includes("jhonata") ||
+    (nome.includes("jhonata") && (nome.includes("santos") || nome.includes("gonçalves") || nome.includes("goncalves")))
+  );
+};
 
 interface DashboardViewProps {
   inspections: Inspection[];
   supervisors: Supervisor[];
   areas: Area[];
   contracts: Contract[];
+  selectedMonth?: string;
+  onSelectMonth?: (month: string) => void;
   onEditInspection: (inspection: Inspection) => void;
   onSelectTab: (tab: string) => void;
 }
@@ -52,9 +95,22 @@ export default function DashboardView({
   supervisors,
   areas,
   contracts,
+  selectedMonth: propSelectedMonth,
+  onSelectMonth,
   onEditInspection,
   onSelectTab
 }: DashboardViewProps) {
+  const [localMonth, setLocalMonth] = useState("auto");
+  const activeMonth = propSelectedMonth !== undefined ? propSelectedMonth : localMonth;
+  const effectiveMonthKey = getEffectiveMonthKey(activeMonth);
+
+  const handleMonthChange = (val: string) => {
+    if (onSelectMonth) {
+      onSelectMonth(val);
+    } else {
+      setLocalMonth(val);
+    }
+  };
   // --- HELPERS FOR BLOCK REPRESENTATION ---
   const getBlockProgressString = (done: number, target: number) => {
     const ratio = target > 0 ? Math.min(done, target) / target : 0;
@@ -71,30 +127,229 @@ export default function DashboardView({
     const blocks = "█".repeat(filledCount) + "░".repeat(emptyCount);
     const isCompleted = count >= target;
     return (
-      <div className="p-3 bg-slate-50 border border-slate-100 rounded-lg space-y-1.5 hover:bg-slate-100/60 transition">
+      <div className="p-3 bg-slate-50 border border-slate-100 rounded-lg space-y-1.5 hover:bg-slate-100/60 transition" id={`progress-card-${label.toLowerCase().replace(/\s+/g, '-')}`}>
         <div className="flex items-center justify-between text-[11px] font-extrabold text-slate-700">
           <span className="flex items-center gap-1.5">{icon} {label}</span>
           <span className={isCompleted ? "text-emerald-600 font-black" : "text-[#F58220] font-black"}>
-            {count} de {target}
+            {count} / {target}
           </span>
         </div>
         <div className="flex items-center justify-between gap-3 flex-wrap">
           <span className="font-mono text-xs font-bold tracking-widest text-slate-600 leading-none">
             {blocks}
           </span>
-          <span className={`px-2 py-0.5 text-[8px] font-black rounded uppercase tracking-wider leading-none ${
-            isCompleted ? "bg-emerald-100 text-emerald-800 border border-emerald-200" : "bg-orange-50 text-orange-800 border border-orange-150"
-          }`}>
-            {isCompleted ? "Meta Cumprida" : "Pendente"}
-          </span>
+          {isCompleted && (
+            <span className="px-2 py-0.5 text-[8px] font-black rounded uppercase tracking-wider leading-none bg-emerald-100 text-emerald-800 border border-emerald-200">
+              META CUMPRIDA
+            </span>
+          )}
         </div>
       </div>
     );
   };
 
-  // --- CALENDAR STATES ---
+  // --- FILTER STATES ---
+  const [timeframe, setTimeframe] = useState<"all" | "diario" | "semanal" | "mensal" | "personalizado">("all");
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
+  const [selectedSupervisorId, setSelectedSupervisorId] = useState("all");
+  const [selectedAreaId, setSelectedAreaId] = useState("all");
+  const [selectedTipo, setSelectedTipo] = useState("all");
+  const [selectedPotencial, setSelectedPotencial] = useState("all");
+  const [selectedOperationalWeekDate, setSelectedOperationalWeekDate] = useState<string>("");
+
+  const resetFilters = () => {
+    setTimeframe("all");
+    setStartDate("");
+    setEndDate("");
+    setSelectedSupervisorId("all");
+    setSelectedAreaId("all");
+    setSelectedTipo("all");
+    setSelectedPotencial("all");
+    setSelectedOperationalWeekDate("");
+    handleMonthChange("auto");
+    setCurrentCalendarMonth(new Date());
+  };
+
+  // --- SELECTED OPERATIONAL WEEK RANGE ---
+  const activeOperationalWeek = useMemo(() => {
+    if (timeframe === "personalizado" && startDate && endDate) {
+      const s = normalizeInspectionDate(startDate);
+      const e = normalizeInspectionDate(endDate);
+      s.setHours(0, 0, 0, 0);
+      e.setHours(23, 59, 59, 999);
+      return { start: s, end: e };
+    } else if (timeframe === "personalizado" && startDate) {
+      return getOperationalWeek(startDate);
+    } else if (timeframe === "semanal" && selectedOperationalWeekDate) {
+      return getOperationalWeek(selectedOperationalWeekDate);
+    } else {
+      return getOperationalWeek(new Date());
+    }
+  }, [timeframe, startDate, endDate, selectedOperationalWeekDate]);
+
+  // --- FILTERED INSPECTIONS ---
+  const filteredInspections = useMemo(() => {
+    return inspections.filter((item) => {
+      // 1. Timeframe filter
+      const itemDate = new Date(`${item.data}T00:00:00`);
+      const today = new Date();
+
+      if (timeframe === "diario") {
+        const todayStart = new Date(today);
+        todayStart.setHours(0, 0, 0, 0);
+        const todayEnd = new Date(today);
+        todayEnd.setHours(23, 59, 59, 999);
+        if (itemDate < todayStart || itemDate > todayEnd) return false;
+      } else if (timeframe === "semanal") {
+        const { start, end } = activeOperationalWeek;
+        if (itemDate < start || itemDate > end) return false;
+      } else if (timeframe === "mensal") {
+        const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+        startOfMonth.setHours(0, 0, 0, 0);
+        const endOfMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+        endOfMonth.setHours(23, 59, 59, 999);
+        if (itemDate < startOfMonth || itemDate > endOfMonth) return false;
+      } else if (timeframe === "personalizado") {
+        if (startDate) {
+          const sDate = new Date(`${startDate}T00:00:00`);
+          if (itemDate < sDate) return false;
+        }
+        if (endDate) {
+          const eDate = new Date(`${endDate}T23:59:59.999`);
+          if (itemDate > eDate) return false;
+        }
+      }
+
+      // 2. Supervisor filter
+      if (selectedSupervisorId !== "all" && item.supervisorId !== selectedSupervisorId) {
+        return false;
+      }
+
+      // 3. Area filter
+      if (selectedAreaId !== "all" && item.areaId !== selectedAreaId) {
+        return false;
+      }
+
+      // 4. Type filter
+      if (selectedTipo !== "all" && getTipoLancamento(item.atividade, item.tipo) !== selectedTipo) {
+        return false;
+      }
+
+      // 5. Potential filter
+      if (selectedPotencial !== "all" && item.potencial !== selectedPotencial) {
+        return false;
+      }
+
+      return true;
+    });
+  }, [inspections, timeframe, activeOperationalWeek, startDate, endDate, selectedSupervisorId, selectedAreaId, selectedTipo, selectedPotencial]);
+
+  // --- CENTRALIZED WEEKLY INSPECTIONS FOR MULTIPLE COMPONENTS ---
+  const weeklyInspections = useMemo(() => {
+    const { start, end } = activeOperationalWeek;
+    return filteredInspections.filter((item) => {
+      const itemDate = new Date(`${item.data}T12:00:00`);
+      return itemDate >= start && itemDate <= end;
+    });
+  }, [filteredInspections, activeOperationalWeek]);
+
+  const isDashboardFiltered = useMemo(() => {
+    return selectedAreaId !== "all" || selectedTipo !== "all" || selectedPotencial !== "all" || timeframe !== "all";
+  }, [selectedAreaId, selectedTipo, selectedPotencial, timeframe]);
+
+  // --- CALENDAR STATES & MEMOS ---
   const [currentCalendarMonth, setCurrentCalendarMonth] = useState<Date>(new Date());
-  const [selectedCalendarDate, setSelectedCalendarDate] = useState<string>(new Date().toISOString().split("T")[0]);
+  const [selectedCalendarDate, setSelectedCalendarDate] = useState<string>(
+    new Date().toLocaleDateString("en-CA", { timeZone: "America/Sao_Paulo" })
+  );
+
+  const normalizeDateToKey = (rawDate: any): string | null => {
+    if (!rawDate) return null;
+
+    if (typeof rawDate === "object") {
+      if (typeof rawDate.toDate === "function") {
+        const d = rawDate.toDate();
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, "0");
+        const day = String(d.getDate()).padStart(2, "0");
+        return `${y}-${m}-${day}`;
+      }
+      if (rawDate instanceof Date && !isNaN(rawDate.getTime())) {
+        const y = rawDate.getFullYear();
+        const m = String(rawDate.getMonth() + 1).padStart(2, "0");
+        const day = String(rawDate.getDate()).padStart(2, "0");
+        return `${y}-${m}-${day}`;
+      }
+      if (typeof rawDate.seconds === "number") {
+        const d = new Date(rawDate.seconds * 1000);
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, "0");
+        const day = String(d.getDate()).padStart(2, "0");
+        return `${y}-${m}-${day}`;
+      }
+    }
+
+    const str = String(rawDate).trim();
+    if (!str) return null;
+
+    if (str.includes("-")) {
+      const part = str.split("T")[0].split(" ")[0];
+      const parts = part.split("-");
+      if (parts.length === 3 && parts[0].length === 4) {
+        const y = parts[0];
+        const m = parts[1].padStart(2, "0");
+        const d = parts[2].padStart(2, "0");
+        return `${y}-${m}-${d}`;
+      }
+    }
+
+    if (str.includes("/")) {
+      const part = str.split(" ")[0];
+      const parts = part.split("/");
+      if (parts.length === 3 && parts[2].length === 4) {
+        const y = parts[2];
+        const m = parts[1].padStart(2, "0");
+        const d = parts[0].padStart(2, "0");
+        return `${y}-${m}-${d}`;
+      }
+    }
+
+    if (/^\d{10,13}$/.test(str)) {
+      const num = Number(str);
+      const d = new Date(num < 10000000000 ? num * 1000 : num);
+      if (!isNaN(d.getTime())) {
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, "0");
+        const day = String(d.getDate()).padStart(2, "0");
+        return `${y}-${m}-${day}`;
+      }
+    }
+
+    return null;
+  };
+
+  useEffect(() => {
+    if (effectiveMonthKey && /^\d{4}-\d{2}$/.test(effectiveMonthKey)) {
+      const [y, m] = effectiveMonthKey.split("-").map(Number);
+      if (!isNaN(y) && !isNaN(m)) {
+        setCurrentCalendarMonth(new Date(y, m - 1, 1));
+      }
+    }
+  }, [effectiveMonthKey]);
+
+  const dashboardMonthKey = effectiveMonthKey;
+
+  const monthlyInspections = useMemo(() => {
+    const baseList = getUniqueMonthlyInspections(inspections, dashboardMonthKey);
+    return baseList.filter((insp) => {
+      if (selectedSupervisorId !== "all" && insp.supervisorId !== selectedSupervisorId) return false;
+      if (selectedAreaId !== "all" && insp.areaId !== selectedAreaId) return false;
+      if (selectedTipo !== "all" && getTipoLancamento(insp.atividade, insp.tipo) !== selectedTipo) return false;
+      if (selectedPotencial !== "all" && insp.potencial !== selectedPotencial) return false;
+      return true;
+    });
+  }, [inspections, dashboardMonthKey, selectedSupervisorId, selectedAreaId, selectedTipo, selectedPotencial]);
 
   const calendarDays = useMemo(() => {
     const year = currentCalendarMonth.getFullYear();
@@ -123,87 +378,14 @@ export default function DashboardView({
   }, [currentCalendarMonth]);
 
   const inspectionsByDate = useMemo(() => {
-    const map: Record<string, Inspection[]> = {};
-    inspections.forEach((insp) => {
-      if (!map[insp.data]) map[insp.data] = [];
-      map[insp.data].push(insp);
-    });
-    return map;
-  }, [inspections]);
-
-  // --- FILTER STATES ---
-  const [timeframe, setTimeframe] = useState<"all" | "diario" | "semanal" | "mensal" | "personalizado">("all");
-  const [startDate, setStartDate] = useState("");
-  const [endDate, setEndDate] = useState("");
-  const [selectedSupervisorId, setSelectedSupervisorId] = useState("all");
-  const [selectedAreaId, setSelectedAreaId] = useState("all");
-  const [selectedTipo, setSelectedTipo] = useState("all");
-  const [selectedPotencial, setSelectedPotencial] = useState("all");
-
-  const resetFilters = () => {
-    setTimeframe("all");
-    setStartDate("");
-    setEndDate("");
-    setSelectedSupervisorId("all");
-    setSelectedAreaId("all");
-    setSelectedTipo("all");
-    setSelectedPotencial("all");
-  };
-
-  // --- FILTERED INSPECTIONS ---
-  const filteredInspections = useMemo(() => {
-    return inspections.filter((item) => {
-      // 1. Timeframe filter
-      const itemDate = new Date(item.data);
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-
-      if (timeframe === "diario") {
-        const itemDay = new Date(item.data + "T00:00:00");
-        if (itemDay.toDateString() !== today.toDateString()) return false;
-      } else if (timeframe === "semanal") {
-        const weekAgo = new Date(today);
-        weekAgo.setDate(today.getDate() - 7);
-        if (itemDate < weekAgo) return false;
-      } else if (timeframe === "mensal") {
-        const monthAgo = new Date(today);
-        monthAgo.setDate(today.getDate() - 30);
-        if (itemDate < monthAgo) return false;
-      } else if (timeframe === "personalizado") {
-        if (startDate) {
-          const sDate = new Date(startDate);
-          if (itemDate < sDate) return false;
-        }
-        if (endDate) {
-          const eDate = new Date(endDate);
-          eDate.setHours(23, 59, 59, 999);
-          if (itemDate > eDate) return false;
-        }
-      }
-
-      // 2. Supervisor filter
-      if (selectedSupervisorId !== "all" && item.supervisorId !== selectedSupervisorId) {
-        return false;
-      }
-
-      // 3. Area filter
-      if (selectedAreaId !== "all" && item.areaId !== selectedAreaId) {
-        return false;
-      }
-
-      // 4. Type filter
-      if (selectedTipo !== "all" && getTipoLancamento(item.atividade, item.tipo) !== selectedTipo) {
-        return false;
-      }
-
-      // 5. Potential filter
-      if (selectedPotencial !== "all" && item.potencial !== selectedPotencial) {
-        return false;
-      }
-
-      return true;
-    });
-  }, [inspections, timeframe, startDate, endDate, selectedSupervisorId, selectedAreaId, selectedTipo, selectedPotencial]);
+    return monthlyInspections.reduce((map: Record<string, Inspection[]>, insp) => {
+      const dateKey = getNormalizedInspectionDate(insp);
+      if (!dateKey) return map;
+      if (!map[dateKey]) map[dateKey] = [];
+      map[dateKey].push(insp);
+      return map;
+    }, {});
+  }, [monthlyInspections]);
 
   // --- CORE INDICATORS ---
   const indicators = useMemo(() => {
@@ -213,10 +395,12 @@ export default function DashboardView({
     const dss = filteredInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "DSS").length;
     const ar = filteredInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "AR").length;
     const lvcc = filteredInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "LVCC").length;
-    const dial = filteredInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "DIAL / Desvio Comportamental").length;
+    const dial = filteredInspections.filter(isDialInspection).length;
+    const desviosComportamentais = filteredInspections.filter(isDesvioComportamentalInspection).length;
     const desviosEstruturais = filteredInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "Desvio Estrutural").length;
     const notificacoes = filteredInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "Notificação").length;
     const interdicoes = filteredInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "Interdição").length;
+    const presenca = filteredInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "Presença em Campo").length;
     const criticos = filteredInspections.filter((i) => i.potencial === Potential.CRITICO).length;
 
     // Supervisor Destaque da Semana math (Most inspections in this current filtered list)
@@ -243,9 +427,11 @@ export default function DashboardView({
       ar,
       lvcc,
       dial,
+      desviosComportamentais,
       desviosEstruturais,
       notificacoes,
       interdicoes,
+      presenca,
       criticos,
       highlightSupervisor,
       highlightCount: maxCount
@@ -262,17 +448,6 @@ export default function DashboardView({
   const targets = useMemo(() => {
     const today = new Date();
     
-    // Start of current week (Monday)
-    const dayOfWeek = today.getDay();
-    const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
-    const startOfWeek = new Date(today);
-    startOfWeek.setDate(today.getDate() + mondayOffset);
-    startOfWeek.setHours(0, 0, 0, 0);
-    
-    const endOfWeek = new Date(startOfWeek);
-    endOfWeek.setDate(startOfWeek.getDate() + 6);
-    endOfWeek.setHours(23, 59, 59, 999);
-    
     // Start of current month
     const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
     const endOfMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0);
@@ -281,32 +456,31 @@ export default function DashboardView({
     const activeSups = supervisors.filter(s => s.ativo);
     const selectedSupervisor = activeSups.find(s => s.id === selectedSupervisorId);
     const typeBasedSupervisors = activeSups.filter(s => s.tipoMeta !== "quantitativa");
-    const targetPerType = selectedSupervisorId === "all" ? Math.max(typeBasedSupervisors.length, 1) : 1;
-    const weeklyGoal = (sup?: Supervisor) => sup?.metaSemanal ?? 7;
-    const monthlyGoal = (sup?: Supervisor) => sup?.metaMensal ?? 28;
+    const targetPerType = 7;
+    const weeklyGoal = (sup?: Supervisor) => {
+      if (isJhonata(sup)) return sup?.metaSemanal ?? 2;
+      return sup?.metaSemanal ?? 7;
+    };
+    const monthlyGoal = (sup?: Supervisor) => {
+      if (isJhonata(sup)) return sup?.metaMensal ?? 8;
+      return sup?.metaMensal ?? 28;
+    };
     const totalWeeklyTarget = selectedSupervisorId === "all"
       ? Math.max(activeSups.reduce((sum, sup) => sum + weeklyGoal(sup), 0), 1)
       : weeklyGoal(selectedSupervisor);
     const isQuantitativeGoal = selectedSupervisorId !== "all" && selectedSupervisor?.tipoMeta === "quantitativa";
 
-    // Filter inspections for this week and month (considering selected supervisor)
-    const weekInspections = inspections.filter((i) => {
-      const iDate = new Date(i.data + "T00:00:00");
-      const matchesSupervisor = selectedSupervisorId === "all" || i.supervisorId === selectedSupervisorId;
-      return iDate >= startOfWeek && iDate <= endOfWeek && matchesSupervisor;
-    });
+    // Use centralized weeklyInspections
+    const weekInspections = weeklyInspections;
 
-    const monthInspections = inspections.filter((i) => {
-      const iDate = new Date(i.data + "T00:00:00");
-      const matchesSupervisor = selectedSupervisorId === "all" || i.supervisorId === selectedSupervisorId;
-      return iDate >= startOfMonth && iDate <= endOfMonth && matchesSupervisor;
-    });
+    const monthInspections = monthlyInspections;
 
-    // Counts for each of the 7 types for this week
+    // Counts for each of the types for this week
     const dssCount = weekInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "DSS").length;
     const arCount = weekInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "AR").length;
     const lvccCount = weekInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "LVCC").length;
-    const dialCount = weekInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "DIAL / Desvio Comportamental").length;
+    const dialCount = weekInspections.filter(isDialInspection).length;
+    const comportamentalCount = weekInspections.filter(isDesvioComportamentalInspection).length;
     const estruturalCount = weekInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "Desvio Estrutural").length;
     const notificacaoCount = weekInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "Notificação").length;
     const interdicaoCount = weekInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "Interdição").length;
@@ -316,6 +490,7 @@ export default function DashboardView({
     const arAchieved = arCount >= targetPerType;
     const lvccAchieved = lvccCount >= targetPerType;
     const dialAchieved = dialCount >= targetPerType;
+    const comportamentalAchieved = comportamentalCount >= targetPerType;
     const estruturalAchieved = estruturalCount >= targetPerType;
     const notificacaoAchieved = notificacaoCount >= targetPerType;
     const interdicaoAchieved = interdicaoCount >= targetPerType;
@@ -325,11 +500,12 @@ export default function DashboardView({
     const arCapped = Math.min(arCount, targetPerType);
     const lvccCapped = Math.min(lvccCount, targetPerType);
     const dialCapped = Math.min(dialCount, targetPerType);
+    const comportamentalCapped = Math.min(comportamentalCount, targetPerType);
     const estruturalCapped = Math.min(estruturalCount, targetPerType);
     const notificacaoCapped = Math.min(notificacaoCount, targetPerType);
     const interdicaoCapped = Math.min(interdicaoCount, targetPerType);
 
-    const typeBasedWeeklyAchieved = dssCapped + arCapped + lvccCapped + dialCapped + estruturalCapped + notificacaoCapped + interdicaoCapped;
+    const typeBasedWeeklyAchieved = dssCapped + arCapped + lvccCapped + dialCapped + comportamentalCapped + estruturalCapped + notificacaoCapped + interdicaoCapped;
     const totalWeeklyAchieved = selectedSupervisorId === "all"
       ? activeSups.reduce((sum, sup) => {
           const count = weekInspections.filter(i => i.supervisorId === sup.id).length;
@@ -352,7 +528,7 @@ export default function DashboardView({
     const monthlyTarget = selectedSupervisorId === "all"
       ? Math.max(activeSups.reduce((sum, sup) => sum + monthlyGoal(sup), 0), 1)
       : monthlyGoal(selectedSupervisor);
-    const monthlyPercentage = Math.round((Math.min(monthlyTotalCount, monthlyTarget) / monthlyTarget) * 100);
+    const monthlyPercentage = monthlyTarget > 0 ? Math.round((monthlyTotalCount / monthlyTarget) * 100) : 0;
 
     // Dynamic smart alerts with priorities
     const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
@@ -360,7 +536,7 @@ export default function DashboardView({
 
     // 1. Team-level aggregated alerts if "all" is selected
     if (selectedSupervisorId === "all") {
-      const unresolved = inspections.filter((i) => i.status !== InspectionStatus.CONCLUIDO);
+      const unresolved = filteredInspections.filter((i) => i.status !== InspectionStatus.CONCLUIDO);
       const overdueCount = unresolved.filter((i) => i.prazo < todayStr).length;
       const totalOpenAndInProgress = unresolved.length;
 
@@ -384,7 +560,7 @@ export default function DashboardView({
       : supervisors.filter((s) => s.id === selectedSupervisorId);
 
     supsToCheck.forEach((sup) => {
-      const supInsps = inspections.filter((i) => i.supervisorId === sup.id);
+      const supInsps = filteredInspections.filter((i) => i.supervisorId === sup.id);
       const unresolved = supInsps.filter((i) => i.status !== InspectionStatus.CONCLUIDO);
 
       // Crítico check
@@ -430,15 +606,13 @@ export default function DashboardView({
       }
 
       // Pendente weekly targets
-      const supWeekInsps = supInsps.filter((i) => {
-        const iDate = new Date(i.data + "T00:00:00");
-        return iDate >= startOfWeek && iDate <= endOfWeek;
-      });
+      const supWeekInsps = weeklyInspections.filter((i) => i.supervisorId === sup.id);
 
       const supDss = supWeekInsps.some((i) => getTipoLancamento(i.atividade, i.tipo) === "DSS");
       const supAr = supWeekInsps.some((i) => getTipoLancamento(i.atividade, i.tipo) === "AR");
       const supLvcc = supWeekInsps.some((i) => getTipoLancamento(i.atividade, i.tipo) === "LVCC");
-      const supDial = supWeekInsps.some((i) => getTipoLancamento(i.atividade, i.tipo) === "DIAL / Desvio Comportamental");
+      const supDial = supWeekInsps.some(isDialInspection);
+      const supComportamental = supWeekInsps.some(isDesvioComportamentalInspection);
       const supEstrutural = supWeekInsps.some((i) => getTipoLancamento(i.atividade, i.tipo) === "Desvio Estrutural");
       const supNotificacao = supWeekInsps.some((i) => getTipoLancamento(i.atividade, i.tipo) === "Notificação");
       const supInterdicao = supWeekInsps.some((i) => getTipoLancamento(i.atividade, i.tipo) === "Interdição");
@@ -451,6 +625,7 @@ export default function DashboardView({
         if (!supAr) smartAlertsList.push({ text: `${sup.nome} ainda não realizou AR nesta semana.`, type: "pendente" });
         if (!supLvcc) smartAlertsList.push({ text: `${sup.nome} ainda não realizou LVCC nesta semana.`, type: "pendente" });
         if (!supDial) smartAlertsList.push({ text: `${sup.nome} ainda não realizou DIAL nesta semana.`, type: "pendente" });
+        if (!supComportamental) smartAlertsList.push({ text: `${sup.nome} ainda não realizou Desvio Comportamental nesta semana.`, type: "pendente" });
         if (!supEstrutural) smartAlertsList.push({ text: `${sup.nome} ainda não realizou Desvio Estrutural nesta semana.`, type: "pendente" });
         if (!supNotificacao) smartAlertsList.push({ text: `${sup.nome} ainda não realizou Notificação nesta semana.`, type: "pendente" });
         if (!supInterdicao) smartAlertsList.push({ text: `${sup.nome} ainda não realizou Interdição nesta semana.`, type: "pendente" });
@@ -462,6 +637,7 @@ export default function DashboardView({
         (supAr ? 1 : 0) + 
         (supLvcc ? 1 : 0) + 
         (supDial ? 1 : 0) + 
+        (supComportamental ? 1 : 0) + 
         (supEstrutural ? 1 : 0) + 
         (supNotificacao ? 1 : 0) + 
         (supInterdicao ? 1 : 0);
@@ -495,6 +671,7 @@ export default function DashboardView({
       arCount,
       lvccCount,
       dialCount,
+      comportamentalCount,
       estruturalCount,
       notificacaoCount,
       interdicaoCount,
@@ -502,6 +679,7 @@ export default function DashboardView({
       arAchieved,
       lvccAchieved,
       dialAchieved,
+      comportamentalAchieved,
       estruturalAchieved,
       notificacaoAchieved,
       interdicaoAchieved,
@@ -515,32 +693,30 @@ export default function DashboardView({
       monthlyPercentage,
       smartAlerts: smartAlertsList
     };
-  }, [inspections, selectedSupervisorId, supervisors]);
+  }, [weeklyInspections, filteredInspections, selectedSupervisorId, supervisors]);
 
   // --- NEW MEMOS FOR ADVANCED CARDS ---
   const topSupervisorsOfWeek = useMemo(() => {
-    const today = new Date();
-    const dayOfWeek = today.getDay();
-    const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
-    const startOfWeek = new Date(today);
-    startOfWeek.setDate(today.getDate() + mondayOffset);
-    startOfWeek.setHours(0, 0, 0, 0);
-    const endOfWeek = new Date(startOfWeek);
-    endOfWeek.setDate(startOfWeek.getDate() + 6);
-    endOfWeek.setHours(23, 59, 59, 999);
+    const getMostRecentInspectionTime = (insps: Inspection[]) => {
+      if (insps.length === 0) return 0;
+      let maxTime = 0;
+      insps.forEach(i => {
+        const t = i.createdAt ? new Date(i.createdAt).getTime() : new Date(`${i.data}T00:00:00`).getTime();
+        if (t > maxTime) maxTime = t;
+      });
+      return maxTime;
+    };
 
     return supervisors
       .map((sup) => {
-        const supWeekInsps = inspections.filter((i) => {
-          const iDate = new Date(i.data + "T00:00:00");
-          return i.supervisorId === sup.id && iDate >= startOfWeek && iDate <= endOfWeek;
-        });
+        const supWeekInsps = weeklyInspections.filter((i) => i.supervisorId === sup.id);
 
-        // Count unique types achieved out of the 7
+        // Count unique types achieved
         const dssCount = supWeekInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "DSS").length;
         const arCount = supWeekInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "AR").length;
         const lvccCount = supWeekInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "LVCC").length;
-        const dialCount = supWeekInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "DIAL / Desvio Comportamental").length;
+        const dialCount = supWeekInsps.filter(isDialInspection).length;
+        const comportamentalCount = supWeekInsps.filter(isDesvioComportamentalInspection).length;
         const estruturalCount = supWeekInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "Desvio Estrutural").length;
         const notificacaoCount = supWeekInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "Notificação").length;
         const interdicaoCount = supWeekInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "Interdição").length;
@@ -550,15 +726,21 @@ export default function DashboardView({
           (arCount >= 1 ? 1 : 0) + 
           (lvccCount >= 1 ? 1 : 0) + 
           (dialCount >= 1 ? 1 : 0) + 
+          (comportamentalCount >= 1 ? 1 : 0) + 
           (estruturalCount >= 1 ? 1 : 0) + 
           (notificacaoCount >= 1 ? 1 : 0) + 
           (interdicaoCount >= 1 ? 1 : 0);
 
-        const weeklyTarget = sup.metaSemanal ?? 7;
+        // Weekly target
+        const weeklyTarget = isJhonata(sup) ? (sup.metaSemanal ?? 2) : (sup.metaSemanal ?? (sup.unidade === "VLI" ? 7 : 4));
         const weeklyAchievedCount = sup.tipoMeta === "quantitativa"
           ? Math.min(supWeekInsps.length, weeklyTarget)
           : Math.min(typeBasedAchievedCount, weeklyTarget);
         const percentage = Math.min(100, Math.round((weeklyAchievedCount / weeklyTarget) * 100));
+
+        // Scoring
+        const pontuacao = supWeekInsps.reduce((sum, i) => sum + getInspectionScore(i), 0);
+        const mostRecentTime = getMostRecentInspectionTime(supWeekInsps);
 
         return {
           id: sup.id,
@@ -566,83 +748,74 @@ export default function DashboardView({
           weeklyAchievedCount,
           weeklyTarget,
           percentage,
-          totalInsps: supWeekInsps.length
+          totalInsps: supWeekInsps.length,
+          pontuacao,
+          mostRecentTime
         };
       })
       .sort((a, b) => {
-        if (b.weeklyAchievedCount !== a.weeklyAchievedCount) {
-          return b.weeklyAchievedCount - a.weeklyAchievedCount;
+        // 1. Maior pontuação
+        if (b.pontuacao !== a.pontuacao) {
+          return b.pontuacao - a.pontuacao;
         }
-        return b.totalInsps - a.totalInsps; // tie break by total inspections in the week
+        // 2. Maior percentual da meta
+        if (b.percentage !== a.percentage) {
+          return b.percentage - a.percentage;
+        }
+        // 3. Maior quantidade de inspeções
+        if (b.totalInsps !== a.totalInsps) {
+          return b.totalInsps - a.totalInsps;
+        }
+        // 4. Inspeção mais recente
+        return b.mostRecentTime - a.mostRecentTime;
       })
       .slice(0, 5); // top 5
-  }, [inspections, supervisors]);
+  }, [weeklyInspections, supervisors]);
 
   const pendingOperationalCounts = useMemo(() => {
-    const unresolved = inspections.filter((i) => i.status !== InspectionStatus.CONCLUIDO);
+    const unresolved = filteredInspections.filter((i) => i.status !== InspectionStatus.CONCLUIDO);
 
     const ar = unresolved.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "AR").length;
     const lvcc = unresolved.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "LVCC").length;
-    const dial = unresolved.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "DIAL / Desvio Comportamental").length;
+    const dial = unresolved.filter(isDialInspection).length;
+    const comportamental = unresolved.filter(isDesvioComportamentalInspection).length;
     const estrutural = unresolved.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "Desvio Estrutural").length;
     const notificacao = unresolved.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "Notificação").length;
     const interdicao = unresolved.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "Interdição").length;
 
-    return { ar, lvcc, dial, estrutural, notificacao, interdicao };
-  }, [inspections]);
+    return { ar, lvcc, dial, comportamental, estrutural, notificacao, interdicao };
+  }, [filteredInspections]);
 
   const last10Inspections = useMemo(() => {
-    return [...inspections]
+    return [...filteredInspections]
       .sort((a, b) => {
         const timeA = a.createdAt ? new Date(a.createdAt).getTime() : new Date(a.data + "T12:00:00").getTime();
         const timeB = b.createdAt ? new Date(b.createdAt).getTime() : new Date(b.data + "T12:00:00").getTime();
         return timeB - timeA;
       })
       .slice(0, 10);
-  }, [inspections]);
+  }, [filteredInspections]);
 
   // --- ADVANCED OPERATIONAL KPIS MATH ---
   const advancedKPIs = useMemo(() => {
     const todayStr = getTodayStr();
     
-    const today = new Date();
-    const dayOfWeek = today.getDay();
-    const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
-    const startOfWeek = new Date(today);
-    startOfWeek.setDate(today.getDate() + mondayOffset);
-    startOfWeek.setHours(0, 0, 0, 0);
-    const endOfWeek = new Date(startOfWeek);
-    endOfWeek.setDate(startOfWeek.getDate() + 6);
-    endOfWeek.setHours(23, 59, 59, 999);
-    
     // Filters matched list for advanced KPIs
-    const weekCount = inspections.filter((i) => {
-      const iDate = new Date(i.data + "T00:00:00");
-      const matchesSup = selectedSupervisorId === "all" || i.supervisorId === selectedSupervisorId;
-      return iDate >= startOfWeek && iDate <= endOfWeek && matchesSup;
-    }).length;
+    const weekCount = weeklyInspections.length;
 
-    const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
-    const endOfMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0);
-    endOfMonth.setHours(23, 59, 59, 999);
-    
-    const monthCount = inspections.filter((i) => {
-      const iDate = new Date(i.data + "T00:00:00");
-      const matchesSup = selectedSupervisorId === "all" || i.supervisorId === selectedSupervisorId;
-      return iDate >= startOfMonth && iDate <= endOfMonth && matchesSup;
-    }).length;
+    const monthCount = monthlyInspections.length;
 
-    const unresolved = filteredInspections.filter((i) => i.status !== InspectionStatus.CONCLUIDO);
+    const unresolved = monthlyInspections.filter((i) => i.status !== InspectionStatus.CONCLUIDO);
     const pendingCount = unresolved.length;
-    const completedCount = filteredInspections.filter((i) => i.status === InspectionStatus.CONCLUIDO).length;
-    const inProgressCount = filteredInspections.filter((i) => i.status === InspectionStatus.EM_ANDAMENTO).length;
+    const completedCount = monthlyInspections.filter((i) => i.status === InspectionStatus.CONCLUIDO).length;
+    const inProgressCount = monthlyInspections.filter((i) => i.status === InspectionStatus.EM_ANDAMENTO).length;
     const overdueCount = unresolved.filter((i) => i.prazo < todayStr).length;
-    const criticalCount = filteredInspections.filter((i) => i.potencial === Potential.CRITICO).length;
+    const criticalCount = monthlyInspections.filter((i) => i.potencial === Potential.CRITICO).length;
 
-    // Leaderboard score calculations
+    // Leaderboard score calculations for monthly highlight
     const scores: Record<string, number> = {};
     supervisors.forEach(s => { scores[s.id] = 0; });
-    inspections.forEach((i) => {
+    monthlyInspections.forEach((i) => {
       if (scores[i.supervisorId] !== undefined) {
         if (i.potencial === Potential.LEVE) scores[i.supervisorId] += 1;
         else if (i.potencial === Potential.MEDIO) scores[i.supervisorId] += 2;
@@ -677,15 +850,14 @@ export default function DashboardView({
       topSupervisorName,
       highestScore
     };
-  }, [inspections, filteredInspections, supervisors]);
+  }, [weeklyInspections, monthlyInspections, supervisors]);
 
   // --- PENDÊNCIAS E VENCIMENTOS PANEL MATH ---
   const { pendingInspections, overdueInspections } = useMemo(() => {
     const todayStr = getTodayStr();
     
-    const unresolved = inspections.filter((i) => {
-      const matchesSupervisor = selectedSupervisorId === "all" || i.supervisorId === selectedSupervisorId;
-      return i.status !== InspectionStatus.CONCLUIDO && matchesSupervisor;
+    const unresolved = filteredInspections.filter((i) => {
+      return i.status !== InspectionStatus.CONCLUIDO;
     });
 
     const pending = [...unresolved].sort((a, b) => new Date(a.prazo).getTime() - new Date(b.prazo).getTime());
@@ -696,7 +868,7 @@ export default function DashboardView({
       pendingInspections: pending,
       overdueInspections: overdue
     };
-  }, [inspections, selectedSupervisorId]);
+  }, [filteredInspections]);
 
   // --- CHART 1: Inspeções por Supervisor ---
   const chartSupervisors = useMemo(() => {
@@ -736,7 +908,8 @@ export default function DashboardView({
       "DSS": 0,
       "AR": 0,
       "LVCC": 0,
-      "DIAL / Desvio Comportamental": 0,
+      "DIAL": 0,
+      "Desvio Comportamental": 0,
       "Desvio Estrutural": 0,
       "Notificação": 0,
       "Interdição": 0
@@ -775,33 +948,41 @@ export default function DashboardView({
     };
   }, [filteredInspections]);
 
-  // --- CHART 5: Evolução Temporal (Por dia/semana do mês) ---
+  // --- CHART 5: Evolução Diária do Mês ---
   const chartEvolution = useMemo(() => {
-    // Group last 6 days
-    const dailyData: Record<string, number> = {};
-    const dateLabels: string[] = [];
-    
-    for (let i = 5; i >= 0; i--) {
-      const d = new Date();
-      d.setDate(d.getDate() - i);
-      const str = d.toISOString().split("T")[0];
-      dailyData[str] = 0;
-      // formatted like "05/07"
-      const parts = str.split("-");
-      dateLabels.push(`${parts[2]}/${parts[1]}`);
-    }
+    const [yearStr, monthStr] = dashboardMonthKey.split("-");
+    const year = parseInt(yearStr, 10);
+    const month = parseInt(monthStr, 10) - 1; // 0-indexed month
 
-    filteredInspections.forEach((insp) => {
-      if (dailyData[insp.data] !== undefined) {
-        dailyData[insp.data]++;
+    if (isNaN(year) || isNaN(month) || month < 0 || month > 11) return [];
+
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+
+    const dailyCounts: Record<string, number> = {};
+
+    monthlyInspections.forEach((insp) => {
+      const dateKey = getNormalizedInspectionDate(insp);
+      if (dateKey && dateKey.startsWith(dashboardMonthKey)) {
+        dailyCounts[dateKey] = (dailyCounts[dateKey] || 0) + 1;
       }
     });
 
-    return {
-      labels: dateLabels,
-      values: Object.values(dailyData)
-    };
-  }, [filteredInspections]);
+    const days: { data: string; total: number }[] = [];
+
+    for (let dayNum = 1; dayNum <= daysInMonth; dayNum++) {
+      const dayFormatted = String(dayNum).padStart(2, "0");
+      const monthFormatted = String(month + 1).padStart(2, "0");
+      const dateKey = `${year}-${monthFormatted}-${dayFormatted}`;
+      const label = `${dayFormatted}/${monthFormatted}`;
+
+      days.push({
+        data: label,
+        total: dailyCounts[dateKey] || 0
+      });
+    }
+
+    return days;
+  }, [monthlyInspections, dashboardMonthKey]);
 
   const lastSyncTime = useMemo(() => {
     const now = new Date();
@@ -820,7 +1001,7 @@ export default function DashboardView({
       {/* Page Header */}
       <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b border-gray-100 pb-5">
         <div>
-          <h1 id="dashboard-title" className="text-2xl font-extrabold text-[#0B2E59] tracking-tight">
+          <h1 id="dashboard-title" className="text-3xl font-black bg-gradient-to-r from-[#0B2E59] to-[#1b4372] bg-clip-text text-transparent tracking-tight pb-1">
             Painel Executivo GEMBA FTA
           </h1>
           <p className="text-gray-500 text-sm mt-1">
@@ -828,6 +1009,15 @@ export default function DashboardView({
           </p>
         </div>
         <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4 lg:self-center">
+          {/* Centralized Operational Week Banner */}
+          <div className="bg-blue-50 border border-blue-100 px-4 py-2 rounded-xl flex flex-col items-start text-left shadow-2xs gap-0.5">
+            <span className="text-[9px] uppercase tracking-widest font-black text-[#F58220]">Semana Operacional</span>
+            <div className="flex items-center gap-1.5 text-xs font-extrabold text-[#0B2E59]">
+              <Calendar size={14} />
+              {formatOperationalWeekLabel(activeOperationalWeek)}
+            </div>
+          </div>
+
           {/* Executive Sync and Database Status Panel */}
           <div className="bg-slate-50 border border-slate-200/80 px-3.5 py-2 rounded-xl flex flex-col items-start sm:items-end text-left sm:text-right shadow-2xs gap-1 min-w-[200px]">
             <div className="text-[10px] text-slate-400 font-extrabold uppercase tracking-widest leading-none">
@@ -871,7 +1061,23 @@ export default function DashboardView({
           </h2>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
+          {/* Mês de Referência */}
+          <div className="flex flex-col gap-1">
+            <label className="text-xs font-bold text-gray-600">Mês de Referência</label>
+            <select
+              value={activeMonth}
+              onChange={(e) => handleMonthChange(e.target.value)}
+              className="w-full text-xs bg-gray-50 border border-gray-200 rounded-lg p-2.5 text-gray-800 font-extrabold focus:outline-none focus:ring-1 focus:ring-[#0B2E59] transition-colors"
+            >
+              {getMonthOptions(inspections).map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
           {/* Período */}
           <div className="flex flex-col gap-1">
             <label className="text-xs font-bold text-gray-600">Período de Tempo</label>
@@ -882,7 +1088,7 @@ export default function DashboardView({
             >
               <option value="all">Todo o Histórico</option>
               <option value="diario">Inspeções de Hoje (Diário)</option>
-              <option value="semanal">Últimos 7 Dias (Semanal)</option>
+              <option value="semanal">Semana Operacional (Sexta a Quinta)</option>
               <option value="mensal">Últimos 30 Dias (Mensal)</option>
               <option value="personalizado">Período Personalizado</option>
             </select>
@@ -980,9 +1186,80 @@ export default function DashboardView({
             </>
           )}
         </div>
+
+        {/* Active Filters Display */}
+        {(timeframe !== "all" || selectedSupervisorId !== "all" || selectedAreaId !== "all" || selectedTipo !== "all" || selectedPotencial !== "all") && (
+          <div className="mt-4 pt-4 border-t border-gray-100 flex flex-wrap items-center gap-2">
+            <span className="text-[10px] font-extrabold uppercase tracking-widest text-gray-400">Filtros Ativos:</span>
+            
+            {timeframe !== "all" && (
+              <span className="inline-flex items-center gap-1 text-[11px] font-bold text-blue-800 bg-blue-50 border border-blue-100 rounded-full px-2.5 py-1">
+                <span>Período: {timeframe === "diario" ? "Hoje" : timeframe === "semanal" ? `Semana Operacional (${formatOperationalWeekLabel(activeOperationalWeek)})` : timeframe === "mensal" ? "30 dias" : `Personalizado (${startDate} a ${endDate})`}</span>
+                <button onClick={() => setTimeframe("all")} className="text-blue-500 hover:text-blue-850 font-black ml-1 cursor-pointer">×</button>
+              </span>
+            )}
+
+            {selectedSupervisorId !== "all" && (
+              <span className="inline-flex items-center gap-1 text-[11px] font-bold text-orange-800 bg-orange-50 border border-orange-100 rounded-full px-2.5 py-1">
+                <span>Supervisor: {supervisors.find(s => s.id === selectedSupervisorId)?.nome || "Selecionado"}</span>
+                <button onClick={() => setSelectedSupervisorId("all")} className="text-orange-500 hover:text-orange-855 font-black ml-1 cursor-pointer">×</button>
+              </span>
+            )}
+
+            {selectedAreaId !== "all" && (
+              <span className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-800 bg-emerald-50 border border-emerald-100 rounded-full px-2.5 py-1">
+                <span>Área: {areas.find(a => a.id === selectedAreaId)?.nome || "Selecionada"}</span>
+                <button onClick={() => setSelectedAreaId("all")} className="text-emerald-500 hover:text-emerald-855 font-black ml-1 cursor-pointer">×</button>
+              </span>
+            )}
+
+            {selectedTipo !== "all" && (
+              <span className="inline-flex items-center gap-1 text-[11px] font-bold text-purple-800 bg-purple-50 border border-purple-100 rounded-full px-2.5 py-1">
+                <span>Tipo: {selectedTipo}</span>
+                <button onClick={() => setSelectedTipo("all")} className="text-purple-500 hover:text-purple-855 font-black ml-1 cursor-pointer">×</button>
+              </span>
+            )}
+
+            {selectedPotencial !== "all" && (
+              <span className="inline-flex items-center gap-1 text-[11px] font-bold text-rose-800 bg-rose-50 border border-rose-100 rounded-full px-2.5 py-1">
+                <span>Risco: {selectedPotencial}</span>
+                <button onClick={() => setSelectedPotencial("all")} className="text-rose-500 hover:text-rose-855 font-black ml-1 cursor-pointer">×</button>
+              </span>
+            )}
+
+            <button 
+              onClick={resetFilters} 
+              className="text-[10px] font-black uppercase tracking-wider text-gray-500 hover:text-red-500 ml-auto flex items-center gap-1 cursor-pointer"
+            >
+              Limpar tudo
+            </button>
+          </div>
+        )}
       </div>
 
-      {/* 2.0 META CARDS ROW */}
+      {filteredInspections.length === 0 ? (
+        <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-8 flex flex-col items-center justify-center text-center my-6 gap-4 py-16">
+          <div className="w-16 h-16 rounded-full bg-slate-50 flex items-center justify-center text-3xl shadow-inner animate-bounce">
+            🔍
+          </div>
+          <div className="space-y-1.5 max-w-md">
+            <h3 className="text-sm font-black text-[#0B2E59] uppercase tracking-wider">
+              Nenhuma inspeção encontrada
+            </h3>
+            <p className="text-xs text-gray-400 font-semibold leading-relaxed">
+              Nenhuma inspeção encontrada para os filtros selecionados.
+            </p>
+          </div>
+          <button
+            onClick={resetFilters}
+            className="flex items-center gap-1.5 px-4 py-2 bg-[#0B2E59] text-white text-xs font-bold rounded-lg hover:bg-blue-900 transition-colors shadow-sm cursor-pointer"
+          >
+            <RefreshCw size={12} /> Limpar Todos os Filtros
+          </button>
+        </div>
+      ) : (
+        <>
+          {/* 2.0 META CARDS ROW */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 shrink-0">
         {/* META DA SEMANA */}
         <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-5 flex flex-col justify-between">
@@ -1034,6 +1311,7 @@ export default function DashboardView({
                     {renderBlockProgressRow("AR", "📋", targets.arCount, targets.targetPerType)}
                     {renderBlockProgressRow("LVCC", "🔍", targets.lvccCount, targets.targetPerType)}
                     {renderBlockProgressRow("DIAL", "👥", targets.dialCount, targets.targetPerType)}
+                    {renderBlockProgressRow("Desvio Comportamental", "👤", targets.comportamentalCount, targets.targetPerType)}
                     {renderBlockProgressRow("Desvio Estrutural", "🏗️", targets.estruturalCount, targets.targetPerType)}
                     {renderBlockProgressRow("Notificação", "⚠️", targets.notificacaoCount, targets.targetPerType)}
                     {renderBlockProgressRow("Interdição", "⛔", targets.interdicaoCount, targets.targetPerType)}
@@ -1253,6 +1531,14 @@ export default function DashboardView({
               </div>
 
               <div className="p-2.5 bg-slate-50 border border-slate-100 rounded-lg flex flex-col justify-between">
+                <span className="text-gray-400 text-[9px] font-black uppercase tracking-wider">Comportamental</span>
+                <div className="flex items-end justify-between mt-1">
+                  <span className="text-base font-black text-slate-700">{pendingOperationalCounts.comportamental}</span>
+                  <span className="text-[8px] text-gray-400 font-bold uppercase">Abertos</span>
+                </div>
+              </div>
+
+              <div className="p-2.5 bg-slate-50 border border-slate-100 rounded-lg flex flex-col justify-between col-span-2">
                 <span className="text-gray-400 text-[9px] font-black uppercase tracking-wider">Estrutural</span>
                 <div className="flex items-end justify-between mt-1">
                   <span className="text-base font-black text-slate-700">{pendingOperationalCounts.estrutural}</span>
@@ -1279,7 +1565,7 @@ export default function DashboardView({
             </div>
           </div>
           <div className="mt-4 pt-2 border-t border-slate-50 text-[10px] text-gray-400 font-bold uppercase tracking-wider text-center">
-            Total Pendentes: {pendingOperationalCounts.ar + pendingOperationalCounts.lvcc + pendingOperationalCounts.dial + pendingOperationalCounts.estrutural + pendingOperationalCounts.notificacao + pendingOperationalCounts.interdicao} vistorias
+            Total Pendentes: {pendingOperationalCounts.ar + pendingOperationalCounts.lvcc + pendingOperationalCounts.dial + pendingOperationalCounts.comportamental + pendingOperationalCounts.estrutural + pendingOperationalCounts.notificacao + pendingOperationalCounts.interdicao} vistorias
           </div>
         </div>
 
@@ -1451,7 +1737,7 @@ export default function DashboardView({
             Totalizações de Lançamentos Acumulados
           </h3>
         </div>
-        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2.5 shrink-0">
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 lg:grid-cols-10 gap-2.5 shrink-0">
         {/* Total Inspeções */}
         <div className="bg-white rounded-lg shadow-sm border border-gray-100 border-l-4 border-l-[#0B2E59] p-3 flex flex-col justify-between hover:shadow-md transition-all">
           <div className="space-y-0.5">
@@ -1500,15 +1786,39 @@ export default function DashboardView({
           </div>
         </div>
 
+        {/* Presença em Campo */}
+        <div className="bg-white rounded-lg shadow-sm border border-gray-100 border-l-4 border-l-teal-600 p-3 flex flex-col justify-between hover:shadow-md transition-all">
+          <div className="space-y-0.5">
+            <p className="text-[9px] uppercase font-extrabold text-gray-400 tracking-wider">🚶 PRESENÇA</p>
+            <h3 className="text-lg font-black text-teal-700 leading-tight">{indicators.presenca}</h3>
+          </div>
+          <div className="flex items-center justify-between mt-1 pt-1 border-t border-gray-50">
+            <span className="text-[9px] text-gray-500 font-semibold truncate">Presença em Campo</span>
+            <span className="text-[10px]">🚶</span>
+          </div>
+        </div>
+
         {/* DIAL */}
         <div className="bg-white rounded-lg shadow-sm border border-gray-100 border-l-4 border-l-purple-600 p-3 flex flex-col justify-between hover:shadow-md transition-all">
           <div className="space-y-0.5">
-            <p className="text-[9px] uppercase font-extrabold text-gray-400 tracking-wider">👥 DIAL / COMP.</p>
+            <p className="text-[9px] uppercase font-extrabold text-gray-400 tracking-wider">👥 DIAL</p>
             <h3 className="text-lg font-black text-purple-700 leading-tight">{indicators.dial}</h3>
           </div>
           <div className="flex items-center justify-between mt-1 pt-1 border-t border-gray-50">
-            <span className="text-[9px] text-gray-500 font-semibold truncate">Comportamental</span>
+            <span className="text-[9px] text-gray-500 font-semibold truncate">Diálogo Aberto</span>
             <span className="text-[10px]">👥</span>
+          </div>
+        </div>
+
+        {/* Desvio Comportamental */}
+        <div className="bg-white rounded-lg shadow-sm border border-gray-100 border-l-4 border-l-amber-500 p-3 flex flex-col justify-between hover:shadow-md transition-all">
+          <div className="space-y-0.5">
+            <p className="text-[9px] uppercase font-extrabold text-gray-400 tracking-wider">👤 COMPORTAMENTAL</p>
+            <h3 className="text-lg font-black text-amber-700 leading-tight">{indicators.desviosComportamentais}</h3>
+          </div>
+          <div className="flex items-center justify-between mt-1 pt-1 border-t border-gray-50">
+            <span className="text-[9px] text-gray-500 font-semibold truncate">Comportamental</span>
+            <span className="text-[10px]">👤</span>
           </div>
         </div>
 
@@ -1668,36 +1978,63 @@ export default function DashboardView({
         </div>
 
         {/* Inspeções por Tipo (Segmented Donut or modern list blocks) */}
-        <div className="bg-white p-5 rounded-xl shadow-sm border border-gray-100">
+        <div className="bg-white p-5 rounded-xl shadow-sm border border-gray-100 flex flex-col h-[280px]">
           <h3 className="text-sm font-bold text-[#0B2E59] mb-4 uppercase tracking-wider flex items-center gap-1.5">
-            <Clock size={16} className="text-[#F58220]" /> Evolução Diária (Últimos 6 Dias)
+            <Clock size={16} className="text-[#F58220]" /> EVOLUÇÃO DIÁRIA DO MÊS
           </h3>
-          <div className="flex flex-col justify-between h-full">
-            <div className="flex items-end justify-between h-36 px-4 pb-2">
-              {chartEvolution.values.map((val, idx) => {
-                const maxVal = Math.max(...chartEvolution.values) || 1;
-                const hPct = (val / maxVal) * 80; // Scale to 80% max height
-                return (
-                  <div key={idx} className="flex flex-col items-center gap-2 group flex-1">
-                    {/* Tooltip on hover */}
-                    <span className="text-[10px] bg-gray-800 text-white rounded px-1.5 py-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                      {val}
-                    </span>
-                    {/* Bar */}
-                    <div
-                      style={{ height: `${Math.max(hPct, 8)}%` }}
-                      className="w-8 bg-[#F58220] hover:bg-[#0B2E59] rounded-t transition-all duration-300"
-                    />
-                    {/* Label */}
-                    <span className="text-[10px] text-gray-500 font-semibold">{chartEvolution.labels[idx]}</span>
-                  </div>
-                );
-              })}
-            </div>
-            <p className="text-[10px] text-gray-400 text-center border-t border-gray-50 pt-3 flex items-center justify-center gap-1">
-              <TrendingUp size={12} className="text-green-500" /> Variação quantitativa temporal de vistorias em campo
-            </p>
+          <div className="flex-1 min-h-0 w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart
+                data={chartEvolution}
+                margin={{ top: 10, right: 10, left: -20, bottom: 0 }}
+              >
+                <defs>
+                  <linearGradient id="colorTotal" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#F58220" stopOpacity={0.2}/>
+                    <stop offset="95%" stopColor="#F58220" stopOpacity={0}/>
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f0f0f0" />
+                <XAxis 
+                  dataKey="data" 
+                  tick={{ fill: '#6B7280', fontSize: 10, fontWeight: 600 }}
+                  axisLine={{ stroke: '#E5E7EB' }}
+                  tickLine={false}
+                />
+                <YAxis 
+                  tick={{ fill: '#6B7280', fontSize: 10, fontWeight: 600 }}
+                  axisLine={false}
+                  tickLine={false}
+                  allowDecimals={false}
+                />
+                <RechartsTooltip
+                  contentStyle={{
+                    backgroundColor: '#1F2937',
+                    borderRadius: '0.375rem',
+                    color: '#fff',
+                    fontSize: '11px',
+                    border: 'none',
+                    fontWeight: 600
+                  }}
+                  itemStyle={{ color: '#fff' }}
+                  labelStyle={{ color: '#9CA3AF' }}
+                />
+                <RechartsArea 
+                  type="monotone" 
+                  dataKey="total" 
+                  stroke="#F58220" 
+                  strokeWidth={2.5}
+                  fillOpacity={1} 
+                  fill="url(#colorTotal)"
+                  dot={{ r: 4, stroke: '#F58220', strokeWidth: 2, fill: '#fff' }}
+                  activeDot={{ r: 6, stroke: '#F58220', strokeWidth: 2, fill: '#F58220' }}
+                />
+              </AreaChart>
+            </ResponsiveContainer>
           </div>
+          <p className="text-[10px] text-gray-400 text-center border-t border-gray-50 pt-3 flex items-center justify-center gap-1 mt-2">
+            <TrendingUp size={12} className="text-green-500" /> Variação quantitativa temporal de vistorias em campo
+          </p>
         </div>
       </div>
 
@@ -1848,8 +2185,12 @@ export default function DashboardView({
                     const prev = new Date(currentCalendarMonth);
                     prev.setMonth(prev.getMonth() - 1);
                     setCurrentCalendarMonth(prev);
+                    const year = prev.getFullYear();
+                    const monthStr = String(prev.getMonth() + 1).padStart(2, "0");
+                    setSelectedCalendarDate(`${year}-${monthStr}-01`);
                   }}
-                  className="p-1 hover:bg-gray-200 rounded text-gray-600 transition font-extrabold text-xs"
+                  className="p-1 hover:bg-gray-200 rounded text-gray-600 transition font-extrabold text-xs cursor-pointer"
+                  title="Mês anterior"
                 >
                   ◀
                 </button>
@@ -1862,8 +2203,12 @@ export default function DashboardView({
                     const next = new Date(currentCalendarMonth);
                     next.setMonth(next.getMonth() + 1);
                     setCurrentCalendarMonth(next);
+                    const year = next.getFullYear();
+                    const monthStr = String(next.getMonth() + 1).padStart(2, "0");
+                    setSelectedCalendarDate(`${year}-${monthStr}-01`);
                   }}
-                  className="p-1 hover:bg-gray-200 rounded text-gray-600 transition font-extrabold text-xs"
+                  className="p-1 hover:bg-gray-200 rounded text-gray-600 transition font-extrabold text-xs cursor-pointer"
+                  title="Próximo mês"
                 >
                   ▶
                 </button>
@@ -1895,7 +2240,7 @@ export default function DashboardView({
                       key={dateStr}
                       type="button"
                       onClick={() => setSelectedCalendarDate(dateStr)}
-                      className={`h-9 flex flex-col items-center justify-between p-1 rounded-lg text-xs font-bold transition relative border ${
+                      className={`h-9 flex flex-col items-center justify-between p-1 rounded-lg text-xs font-bold transition relative border cursor-pointer ${
                         isSelected
                           ? "bg-[#0B2E59] text-white border-[#0B2E59]"
                           : hasInspections
@@ -1928,11 +2273,11 @@ export default function DashboardView({
               </div>
             </div>
 
-            <div className="mt-4 pt-3 border-t border-slate-200 flex flex-wrap gap-2 text-[8px] font-bold uppercase text-gray-400">
+            <div className="mt-4 pt-3 border-t border-slate-200 flex flex-wrap gap-2 text-[8px] font-bold uppercase text-gray-500">
               {Object.entries(TIPO_LANCAMENTO_CONFIG).map(([name, conf]) => (
-                <span key={name} className="flex items-center gap-1">
+                <span key={name} className="flex items-center gap-1 bg-white px-1.5 py-0.5 rounded border border-slate-100">
                   <span className="w-2 h-2 rounded-full" style={{ backgroundColor: conf.color }} />
-                  {name.split(" ")[0]}
+                  {name === "Presença em Campo" ? "Presença Campo" : name}
                 </span>
               ))}
             </div>
@@ -2036,9 +2381,10 @@ export default function DashboardView({
                             <span className="text-[8px] font-extrabold text-gray-400 uppercase tracking-wider block mb-1">Antes</span>
                             <div className="flex gap-1 flex-wrap">
                               {insp.fotosAntes.map((img, i) => (
-                                <img
+                                <ResolvedImage
                                   key={i}
                                   src={img}
+                                  rotation={insp.rotacoesFotosAntes ? insp.rotacoesFotosAntes[i] || 0 : 0}
                                   alt="Antes"
                                   referrerPolicy="no-referrer"
                                   className="w-12 h-12 rounded object-cover border border-gray-100 shadow-2xs hover:scale-150 transition-transform cursor-zoom-in"
@@ -2052,9 +2398,10 @@ export default function DashboardView({
                             <span className="text-[8px] font-extrabold text-gray-400 uppercase tracking-wider block mb-1">Depois (Tratativa)</span>
                             <div className="flex gap-1 flex-wrap">
                               {insp.fotosDepois.map((img, i) => (
-                                <img
+                                <ResolvedImage
                                   key={i}
                                   src={img}
+                                  rotation={insp.rotacoesFotosDepois ? insp.rotacoesFotosDepois[i] || 0 : 0}
                                   alt="Depois"
                                   referrerPolicy="no-referrer"
                                   className="w-12 h-12 rounded object-cover border border-gray-100 shadow-2xs hover:scale-150 transition-transform cursor-zoom-in"
@@ -2082,6 +2429,8 @@ export default function DashboardView({
           </div>
         </div>
       </div>
+        </>
+      )}
 
       {/* FAROL GEMBA SECTION */}
       <div id="farol-gemba-dashboard-panel" className="bg-white p-5 rounded-xl shadow-sm border border-gray-100">
@@ -2099,7 +2448,15 @@ export default function DashboardView({
           </span>
         </div>
 
-        <FarolGembaView inspections={inspections} supervisors={supervisors} areas={areas} />
+        <FarolGembaView
+          inspections={filteredInspections}
+          supervisors={supervisors}
+          areas={areas}
+          selectedSupervisorId={selectedSupervisorId}
+          isDashboardFiltered={isDashboardFiltered}
+          selectedMonth={activeMonth}
+          onSelectMonth={handleMonthChange}
+        />
       </div>
     </div>
   );

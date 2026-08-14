@@ -9,6 +9,9 @@ import { Inspection, Supervisor, Area, Contract, SystemConfig, getTipoLancamento
 import { Printer, FileText, Calendar, User, ShieldAlert, CheckCircle, Eye, RefreshCw, Download, Filter, XCircle } from "lucide-react";
 import { jsPDF } from "jspdf";
 import html2canvas from "html2canvas";
+import ResolvedImage from "./ResolvedImage";
+
+import assinaturaJhonata from "../assets/assinatura-jhonata.png?inline";
 
 interface RelatoriosViewProps {
   inspections: Inspection[];
@@ -20,13 +23,13 @@ interface RelatoriosViewProps {
 }
 
 // Beautiful automatic photo layout organizer (No cropping, auto fit, page break safe)
-function PhotoGrid({ title, photos, isBefore }: { title: string; photos: string[]; isBefore: boolean }) {
+function PhotoGrid({ title, photos, isBefore, rotations }: { title: string; photos: string[]; isBefore: boolean; rotations?: number[] }) {
   const count = photos.length;
 
   if (count === 0) {
     return (
-      <div className="space-y-2 flex-1 break-inside-avoid page-break-inside-avoid">
-        <span className={`block text-[10px] font-bold uppercase tracking-widest text-center border-b pb-1 ${
+      <div className="space-y-2 flex-1 break-inside-avoid page-break-inside-avoid photo-grid-block">
+        <span className={`block text-[10px] font-bold uppercase tracking-widest text-center border-b pb-1 photo-grid-title ${
           isBefore ? "text-red-600 border-red-50" : "text-green-700 border-green-50"
         }`}>
           {title}
@@ -49,8 +52,8 @@ function PhotoGrid({ title, photos, isBefore }: { title: string; photos: string[
   }
 
   return (
-    <div className="space-y-2 flex-1 break-inside-avoid page-break-inside-avoid">
-      <span className={`block text-[10px] font-bold uppercase tracking-widest text-center border-b pb-1 ${
+    <div className="space-y-2 flex-1 break-inside-avoid page-break-inside-avoid photo-grid-block">
+      <span className={`block text-[10px] font-bold uppercase tracking-widest text-center border-b pb-1 photo-grid-title ${
         isBefore ? "text-red-600 border-red-50" : "text-green-700 border-green-50"
       }`}>
         {title} ({count})
@@ -58,12 +61,13 @@ function PhotoGrid({ title, photos, isBefore }: { title: string; photos: string[
       <div className={gridClass}>
         {photos.map((img, idx) => {
           return (
-            <div key={idx} className="relative aspect-video rounded-lg border border-gray-200 bg-slate-50 flex items-center justify-center overflow-hidden shadow-2xs hover:shadow-xs transition-shadow">
+            <div key={idx} className="relative aspect-video rounded-lg border border-gray-200 bg-slate-50 flex items-center justify-center overflow-hidden shadow-2xs hover:shadow-xs transition-shadow photo-card-container">
               {/* object-contain ensures images are never cropped, showing full structural details */}
-              <img
+              <ResolvedImage
                 src={img}
+                rotation={rotations ? rotations[idx] || 0 : 0}
                 alt={`${title} ${idx + 1}`}
-                className="w-full h-full object-contain max-h-[180px] select-none"
+                className="w-full h-full object-contain max-h-[180px] select-none photo-img"
                 referrerPolicy="no-referrer"
               />
             </div>
@@ -95,21 +99,100 @@ export default function RelatoriosView({
   const [selectedMonth, setSelectedMonth] = useState<string>("");
   const [selectedYear, setSelectedYear] = useState<string>("");
 
+  // --- ON-DEMAND BACKGROUND FILTERING STATES ---
+  const [fetchedInspections, setFetchedInspections] = useState<Inspection[]>([]);
+  const [loadingFilters, setLoadingFilters] = useState(false);
+
+  const filtersActive = !!(
+    selectedSupervisor ||
+    selectedArea ||
+    selectedTipo ||
+    selectedStatus ||
+    selectedPotencial ||
+    startDate ||
+    endDate ||
+    selectedMonth ||
+    selectedYear
+  );
+
+  useEffect(() => {
+    if (!filtersActive) {
+      setFetchedInspections([]);
+      return;
+    }
+
+    let active = true;
+    const fetchFiltered = async () => {
+      if (document.visibilityState !== "visible") return;
+      setLoadingFilters(true);
+      try {
+        const result = await dbService.getPaginatedInspections({
+          limit: 100, // Fetch up to 100 matched records for reports
+          filters: {
+            supervisorId: selectedSupervisor,
+            areaId: selectedArea,
+            tipo: selectedTipo,
+            status: selectedStatus,
+            potencial: selectedPotencial,
+            data: startDate || undefined
+          }
+        });
+        if (active) {
+          setFetchedInspections(result.items);
+        }
+      } catch (err) {
+        console.error("Erro ao carregar relatórios filtrados:", err);
+      } finally {
+        if (active) setLoadingFilters(false);
+      }
+    };
+
+    const timer = setTimeout(fetchFiltered, 350);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [
+    selectedSupervisor,
+    selectedArea,
+    selectedTipo,
+    selectedStatus,
+    selectedPotencial,
+    startDate,
+    endDate,
+    selectedMonth,
+    selectedYear,
+    filtersActive
+  ]);
+
+  const combinedInspections = useMemo(() => {
+    if (!filtersActive) return inspections;
+    const seen = new Set<string>();
+    const merged: Inspection[] = [];
+    [...fetchedInspections, ...inspections].forEach(item => {
+      if (!seen.has(item.id)) {
+        seen.add(item.id);
+        merged.push(item);
+      }
+    });
+    return merged;
+  }, [inspections, fetchedInspections, filtersActive]);
+
   // Calculate unique types of launch dynamically
   const uniqueTipos = useMemo(() => {
     const set = new Set<string>();
-    inspections.forEach((i) => {
+    combinedInspections.forEach((i) => {
       if (i.tipo) set.add(i.tipo);
       const resolved = getTipoLancamento(i.atividade, i.tipo);
       if (resolved) set.add(resolved);
     });
     return Array.from(set);
-  }, [inspections]);
+  }, [combinedInspections]);
 
   // Calculate unique years dynamically
   const uniqueYears = useMemo(() => {
     const years = new Set<string>();
-    inspections.forEach((i) => {
+    combinedInspections.forEach((i) => {
       if (i.data) {
         const yr = i.data.split("-")[0];
         if (yr && yr.length === 4) {
@@ -119,11 +202,11 @@ export default function RelatoriosView({
     });
     years.add(new Date().getFullYear().toString());
     return Array.from(years).sort().reverse();
-  }, [inspections]);
+  }, [combinedInspections]);
 
   // Apply filters memoized
   const filteredInspections = useMemo(() => {
-    return inspections.filter((item) => {
+    return combinedInspections.filter((item) => {
       if (selectedSupervisor && item.supervisorId !== selectedSupervisor) {
         return false;
       }
@@ -160,7 +243,7 @@ export default function RelatoriosView({
       return true;
     });
   }, [
-    inspections,
+    combinedInspections,
     selectedSupervisor,
     selectedArea,
     selectedTipo,
@@ -221,6 +304,7 @@ export default function RelatoriosView({
   }, [selectedId]);
 
   const [isGeneratingPDF, setIsGeneratingPDF] = useState(false);
+  const [isPreparingPrint, setIsPreparingPrint] = useState(false);
 
   const getFallbackColor = (contents: string): string => {
     const lower = contents.toLowerCase();
@@ -373,6 +457,46 @@ export default function RelatoriosView({
     return replaceOklab(replaceOklch(str));
   };
 
+  const waitForImages = async (element: HTMLElement) => {
+    const hasPendingConversions = () => {
+      return element.innerHTML.includes("Carregando foto...");
+    };
+
+    if (hasPendingConversions()) {
+      let attempts = 0;
+      const maxAttempts = 40; // up to 20 seconds
+      while (hasPendingConversions() && attempts < maxAttempts) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        attempts++;
+      }
+    }
+
+    if (document.fonts && document.fonts.ready) {
+      await document.fonts.ready;
+    }
+
+    const imgs = Array.from(element.getElementsByTagName("img"));
+    const imgPromises = imgs.map((img) => {
+      if (img.complete) {
+        if (typeof img.decode === "function") {
+          return img.decode().catch(() => {});
+        }
+        return Promise.resolve();
+      }
+      return new Promise<void>((resolve) => {
+        img.onload = () => {
+          if (typeof img.decode === "function") {
+            img.decode().then(resolve).catch(resolve);
+          } else {
+            resolve();
+          }
+        };
+        img.onerror = () => resolve();
+      });
+    });
+    await Promise.all(imgPromises);
+  };
+
   const handleDownloadPDF = async () => {
     if (!selectedInspection) {
       alert("Selecione uma inspeção para gerar o relatório.");
@@ -388,6 +512,8 @@ export default function RelatoriosView({
         return;
       }
 
+      await waitForImages(element);
+
       // Render canvas using html2canvas with specific layout bounds and style cleaning onclone
       const canvas = await html2canvas(element, {
         scale: 2, // higher resolution
@@ -399,6 +525,42 @@ export default function RelatoriosView({
         windowWidth: element.clientWidth,
         windowHeight: element.clientHeight,
         onclone: (clonedDoc) => {
+          // 0. Monkeypatch getComputedStyle of the cloned window to convert oklch/oklab to rgb
+          const clonedWin = clonedDoc.defaultView;
+          if (clonedWin) {
+            const originalGetComputedStyle = clonedWin.getComputedStyle;
+            clonedWin.getComputedStyle = function (el: Element, pseudoElt?: string | null) {
+              const style = originalGetComputedStyle.call(clonedWin, el, pseudoElt);
+              return new Proxy(style, {
+                get(target: any, prop: any) {
+                  if (prop === "getPropertyValue") {
+                    return (propertyName: string) => {
+                      const val = target.getPropertyValue(propertyName);
+                      if (typeof val === "string" && (val.includes("oklch") || val.includes("oklab"))) {
+                        return replaceColors(val);
+                      }
+                      return val;
+                    };
+                  }
+                  const val = target[prop];
+                  if (typeof val === "string" && (val.includes("oklch") || val.includes("oklab"))) {
+                    return replaceColors(val);
+                  }
+                  if (typeof val === "function") {
+                    return val.bind(target);
+                  }
+                  return val;
+                }
+              }) as any;
+            };
+          }
+
+          // Add pdf-mode class to the root printable element inside the clone to trigger compact print styling
+          const clonedElement = clonedDoc.getElementById("printable-report-document");
+          if (clonedElement) {
+            clonedElement.classList.add("pdf-mode");
+          }
+
           // 1. Process style attribute of all elements
           const allElements = clonedDoc.querySelectorAll("*");
           allElements.forEach((el) => {
@@ -491,20 +653,135 @@ export default function RelatoriosView({
       alert("A área do relatório não foi encontrada.");
       return;
     }
-    const images = Array.from(element.querySelectorAll("img"));
-    await Promise.all(images.map(img => img.complete ? Promise.resolve() : new Promise<void>(resolve => {
-      img.onload = () => resolve(); img.onerror = () => resolve();
-    })));
-    const printWindow = window.open("", "_blank", "width=1000,height=800");
-    if (!printWindow) {
-      alert("Permita pop-ups para abrir a impressão do relatório.");
-      return;
+
+    try {
+      setIsPreparingPrint(true);
+      await waitForImages(element);
+
+      const printWindow = window.open("", "_blank", "width=1000,height=800");
+      if (!printWindow) {
+        alert("Permita pop-ups para abrir a impressão do relatório.");
+        return;
+      }
+
+      // Collect stylesheets with absolute hrefs and style tags
+      const stylesList: string[] = [];
+      stylesList.push(`<base href="${window.location.origin}/">`);
+
+      Array.from(document.querySelectorAll('style, link[rel="stylesheet"]')).forEach(node => {
+        if (node.tagName.toLowerCase() === 'link') {
+          const link = node as HTMLLinkElement;
+          stylesList.push(`<link rel="stylesheet" href="${link.href}">`);
+        } else {
+          stylesList.push(node.outerHTML);
+        }
+      });
+
+      stylesList.push(`
+        <style>
+          @page {
+            size: A4;
+            margin: 10mm;
+          }
+          body {
+            background: white !important;
+            margin: 0;
+            padding: 0;
+            -webkit-print-color-adjust: exact !important;
+            print-color-adjust: exact !important;
+          }
+          .no-print {
+            display: none !important;
+          }
+          #printable-report-document {
+            box-shadow: none !important;
+            border: 0 !important;
+            width: 100% !important;
+            max-width: none !important;
+            margin: 0 !important;
+            padding: 0 !important;
+          }
+        </style>
+      `);
+
+      const headContent = stylesList.join("\n");
+
+      printWindow.document.write(`<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Relatório GEMBA ${selectedInspection.id}</title>
+  ${headContent}
+</head>
+<body>
+  ${element.outerHTML}
+  <script>
+    async function prepareAndPrint() {
+      // 1. Wait for document fonts
+      if (document.fonts && document.fonts.ready) {
+        await document.fonts.ready;
+      }
+
+      // 2. Wait for stylesheets to load
+      const links = Array.from(document.querySelectorAll('link[rel="stylesheet"]'));
+      const linkPromises = links.map(link => {
+        return new Promise(resolve => {
+          if (link.sheet) {
+            resolve();
+          } else {
+            link.onload = resolve;
+            link.onerror = resolve;
+          }
+        });
+      });
+      await Promise.all(linkPromises);
+
+      // 3. Wait for images to load and decode
+      const images = Array.from(document.getElementsByTagName('img'));
+      const imgPromises = images.map(img => {
+        if (img.complete) {
+          if (typeof img.decode === 'function') {
+            return img.decode().catch(() => {});
+          }
+          return Promise.resolve();
+        }
+        return new Promise(resolve => {
+          img.onload = () => {
+            if (typeof img.decode === 'function') {
+              img.decode().then(resolve).catch(resolve);
+            } else {
+              resolve();
+            }
+          };
+          img.onerror = resolve;
+        });
+      });
+      await Promise.all(imgPromises);
+
+      // 4. Wait a little bit for everything to settle
+      setTimeout(() => {
+        window.print();
+        window.close();
+      }, 500);
     }
-    const styles = Array.from(document.querySelectorAll('style, link[rel="stylesheet"]')).map(node => node.outerHTML).join("\n");
-    printWindow.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Relatório GEMBA ${selectedInspection.id}</title>${styles}<style>@page{size:A4;margin:10mm}body{background:white!important;margin:0}.no-print{display:none!important}#printable-report-document{box-shadow:none!important;border:0!important;width:100%!important;max-width:none!important}</style></head><body>${element.outerHTML}</body></html>`);
-    printWindow.document.close();
-    printWindow.focus();
-    setTimeout(() => { printWindow.print(); printWindow.close(); }, 500);
+
+    if (document.readyState === 'complete') {
+      prepareAndPrint();
+    } else {
+      window.addEventListener('load', prepareAndPrint);
+    }
+  </script>
+</body>
+</html>`);
+
+      printWindow.document.close();
+      printWindow.focus();
+    } catch (err) {
+      console.error("Erro ao preparar a impressão:", err);
+      alert("Não foi possível carregar as imagens para a impressão.");
+    } finally {
+      setIsPreparingPrint(false);
+    }
   };
 
   return (
@@ -522,7 +799,7 @@ export default function RelatoriosView({
         <div className="flex flex-wrap gap-2">
           <button
             onClick={handleDownloadPDF}
-            disabled={isGeneratingPDF}
+            disabled={isGeneratingPDF || isPreparingPrint}
             className="flex items-center gap-1.5 px-4 py-2.5 bg-[#F58220] hover:bg-[#d66f17] disabled:bg-gray-300 text-white text-xs font-black rounded-lg shadow cursor-pointer transition-colors"
           >
             <Download size={14} className={isGeneratingPDF ? "animate-bounce" : ""} />
@@ -530,9 +807,11 @@ export default function RelatoriosView({
           </button>
           <button
             onClick={handlePrint}
-            className="flex items-center gap-1.5 px-4 py-2.5 bg-[#0B2E59] hover:bg-[#133e72] text-white text-xs font-black rounded-lg shadow cursor-pointer transition-colors"
+            disabled={isPreparingPrint || isGeneratingPDF}
+            className="flex items-center gap-1.5 px-4 py-2.5 bg-[#0B2E59] hover:bg-[#133e72] disabled:bg-gray-300 text-white text-xs font-black rounded-lg shadow cursor-pointer transition-colors"
           >
-            <Printer size={14} /> Abrir Impressão
+            <Printer size={14} className={isPreparingPrint ? "animate-spin" : ""} />
+            {isPreparingPrint ? "Preparando relatório..." : "Abrir Impressão"}
           </button>
         </div>
       </div>
@@ -863,7 +1142,7 @@ export default function RelatoriosView({
                       {/* MAIN REPORT BODY */}
                       <div className="space-y-5 text-xs text-gray-700">
                         {/* CORE METADATA GRID */}
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-y-4 gap-x-2 border-b border-gray-100 pb-5 mb-5">
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-y-4 gap-x-2 border-b border-gray-100 pb-5 mb-5 metadata-grid">
                           <div className="p-1">
                             <span className="block text-[9px] uppercase font-bold text-gray-400 tracking-wider">Supervisor</span>
                             <span className="font-extrabold text-gray-900">{getSupervisorName(selectedInspection.supervisorId)}</span>
@@ -1007,70 +1286,54 @@ export default function RelatoriosView({
                                       {selectedInspection.observacoes}
                                     </p>
                                   </div>
-                                )}
-                              </div>
-                            </>
-                          )}
+                                 )}
+                               </div>
+                             </>
+                           )}
+                         </div>
 
                         {/* PHOTO GRID WITH AUTOMATIC ORGANIZER (Avois slicing over page-breaks) */}
-                        <div className={`grid gap-5 pt-4 border-t border-gray-100 break-inside-avoid page-break-inside-avoid ${(isDSS || isPresenca) ? "grid-cols-1 max-w-xl mx-auto" : "grid-cols-1 md:grid-cols-2"}`}>
+                        <div className={`grid gap-5 pt-4 border-t border-gray-100 break-inside-avoid page-break-inside-avoid photo-container-grid ${(isDSS || isPresenca) ? "grid-cols-1 max-w-xl mx-auto" : "grid-cols-1 md:grid-cols-2"}`}>
                           {isPresenca ? (
-                            <PhotoGrid title="Fotos da Presença em Campo" photos={selectedInspection.fotosAntes || []} isBefore={false} />
+                            <PhotoGrid title="Fotos da Presença em Campo" photos={selectedInspection.fotosAntes || []} isBefore={false} rotations={selectedInspection.rotacoesFotosAntes} />
                           ) : isDSS ? (
-                            <PhotoGrid title="Evidências do DSS (Registro Fotográfico)" photos={selectedInspection.fotosAntes || []} isBefore={false} />
+                            <PhotoGrid title="Evidências do DSS (Registro Fotográfico)" photos={selectedInspection.fotosAntes || []} isBefore={false} rotations={selectedInspection.rotacoesFotosAntes} />
                           ) : (
                             <>
-                              <PhotoGrid title="Registro Fotográfico - Antes" photos={selectedInspection.fotosAntes || []} isBefore={true} />
-                              <PhotoGrid title="Registro Fotográfico - Depois (Tratado)" photos={selectedInspection.fotosDepois || []} isBefore={false} />
+                              <PhotoGrid title="Registro Fotográfico - Antes" photos={selectedInspection.fotosAntes || []} isBefore={true} rotations={selectedInspection.rotacoesFotosAntes} />
+                              <PhotoGrid title="Registro Fotográfico - Depois (Tratado)" photos={selectedInspection.fotosDepois || []} isBefore={false} rotations={selectedInspection.rotacoesFotosDepois} />
                             </>
                           )}
                         </div>
 
                           {/* SIGNATURES & APPROVAL SECTION */}
-                          <div className="grid grid-cols-2 gap-8 pt-10 border-t border-gray-100 text-center text-xs text-gray-500 break-inside-avoid page-break-inside-avoid">
-                            <div className="space-y-1.5 flex flex-col justify-end">
-                              <div className="mx-auto w-48 border-b border-gray-300 h-14 flex items-center justify-center">
-                                <span className="text-[9px] text-gray-400 font-medium italic">Assinado Eletronicamente</span>
+                          <div className="signature-section flex flex-col items-center justify-center pt-6 pb-4 border-t border-gray-100 text-center text-xs text-gray-500 break-inside-avoid page-break-inside-avoid">
+                            <div className="flex flex-col items-center justify-center space-y-1">
+                              <div className="signature-img-container mx-auto w-[190px] h-[75px] flex items-center justify-center relative select-none">
+                                <img 
+                                  src={assinaturaJhonata} 
+                                  alt="" 
+                                  className="signature-img report-signature-image max-w-[190px] max-h-[75px] w-auto h-auto object-contain" 
+                                  referrerPolicy="no-referrer"
+                                />
                               </div>
-                              <span className="block font-bold text-gray-800">
-                                {getSupervisorName(selectedInspection.supervisorId)}
-                              </span>
-                              <span className="text-[10px] font-semibold block text-gray-500">
-                                Supervisor Auditante
-                              </span>
-                              <span className="text-[9px] font-bold block text-gray-400">
-                                {config.nomeEmpresa}
-                              </span>
-                            </div>
-                            
-                            {/* Executive Manager Jhonata Santos Approval Block with custom vector signature */}
-                            <div className="space-y-1.5 flex flex-col justify-end">
-                              <div className="mx-auto w-48 h-14 flex items-center justify-center relative border-b border-gray-300">
-                                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 80" width="100%" height="100%" fill="none" stroke="#0E1B2A" strokeWidth="2.8" strokeLinecap="round" strokeLinejoin="round" className="absolute bottom-1.5 w-44 h-12 select-none opacity-95">
-                                  {/* High-fidelity cursive representation of 'Jhonata' */}
-                                  <path d="M 22 45 C 30 30, 48 22, 60 22 C 72 22, 75 28, 62 35 C 48 42, 32 48, 38 54 C 44 58, 60 54, 70 42 C 78 30, 82 12, 88 15 C 94 18, 94 38, 100 42 C 106 46, 114 40, 118 38 C 122 36, 130 30, 133 38 C 135 44, 140 42, 146 35" />
-                                  <path d="M 112 26 Q 124 24 134 26" strokeWidth="2.0" />
-                                  
-                                  {/* Capital 'S' matching the distinctive loop pattern */}
-                                  <path d="M 160 48 C 155 52, 160 56, 168 52 C 180 44, 198 20, 214 20 C 224 20, 230 28, 220 38 C 208 46, 188 54, 174 52 C 166 50, 164 42, 172 38 Q 186 34, 204 36" />
-                                </svg>
-                              </div>
-                              <span className="block font-extrabold text-slate-800 text-[11px]">
+                              {/* Horizontal line with 240px width */}
+                              <div className="signature-line w-[240px] border-t border-gray-300 my-1 mx-auto"></div>
+                              <span className="signature-name block font-bold text-[#0B2E59] text-[14px]">
                                 Jhonata Santos
                               </span>
-                              <span className="text-[9px] font-bold block text-slate-500 uppercase tracking-wide">
-                                Gerente Operacional dos Contratos
+                              <span className="signature-role text-[10px] font-bold block text-slate-700 uppercase tracking-wide">
+                                GERENTE OPERACIONAL DOS CONTRATOS
                               </span>
-                              <span className="text-[9px] font-extrabold block text-slate-400 uppercase tracking-widest">
-                                {config.nomeEmpresa}
+                              <span className="signature-company text-[10px] font-bold block text-slate-500 uppercase tracking-wider">
+                                FTA SERVIÇOS INDUSTRIAIS
                               </span>
                             </div>
                           </div>
                         </div>
-                      </div>
-                    </td>
-                  </tr>
-                </tbody>
+                      </td>
+                    </tr>
+                  </tbody>
 
                 {/* 3. REPEATING FIXED FOOTER ON PRINT */}
                 <tfoot className="hidden print:table-footer-group">
@@ -1091,8 +1354,8 @@ export default function RelatoriosView({
                 </tfoot>
               </table>
 
-              {/* SCREEN-ONLY FOOTER SECTION */}
-              <div className="print:hidden text-center text-[10px] text-gray-400 pt-6 mt-6 border-t border-gray-100 flex items-center justify-between font-semibold select-none">
+              {/* FOOTER SECTION */}
+              <div className="text-center text-[10px] text-gray-400 pt-6 mt-6 border-t border-gray-100 flex items-center justify-between font-semibold select-none print:mt-4 print:pt-4">
                 <div className="flex flex-col gap-0.5 text-left">
                   <span>Relatório Gerado Eletronicamente pelo GEMBA FTA</span>
                   <span>Emitente: <span className="text-gray-500 font-extrabold">Arthur Santos</span> | Gerado em: <span className="text-gray-500 font-extrabold">{reportGenerationTime}</span></span>

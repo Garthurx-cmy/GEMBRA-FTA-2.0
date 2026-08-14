@@ -3,10 +3,27 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import { auth, db } from "./services/firebase";
 import { onAuthStateChanged, signInWithEmailAndPassword, signOut, setPersistence, browserLocalPersistence, browserSessionPersistence, sendPasswordResetEmail, updatePassword } from "firebase/auth";
-import { doc, getDoc, updateDoc, serverTimestamp } from "firebase/firestore";
+import { doc, getDoc, updateDoc as fbUpdateDoc, setDoc as fbSetDoc, serverTimestamp } from "firebase/firestore";
+
+// Trace helper for writes in development
+const setDoc = async (ref: any, data: any, options?: any) => {
+  if (process.env.NODE_ENV !== "production") {
+    const path = ref && typeof ref.path === "string" ? ref.path : "unknown-path";
+    console.trace("[FIRESTORE WRITE]", path, "setDoc", data);
+  }
+  return fbSetDoc(ref, data, options);
+};
+
+const updateDoc = async (ref: any, data: any) => {
+  if (process.env.NODE_ENV !== "production") {
+    const path = ref && typeof ref.path === "string" ? ref.path : "unknown-path";
+    console.trace("[FIRESTORE WRITE]", path, "updateDoc", data);
+  }
+  return fbUpdateDoc(ref, data);
+};
 import { dbService } from "./services/db";
 import {
   Inspection,
@@ -28,6 +45,7 @@ import RankingView from "./components/RankingView";
 import RelatoriosView from "./components/RelatoriosView";
 import ExportacoesView from "./components/ExportacoesView";
 import ConfiguracoesView from "./components/ConfiguracoesView";
+import ResolvedImage from "./components/ResolvedImage";
 import { CheckCircle, AlertCircle, Building2, Bell, Search, FileText, X, ExternalLink } from "lucide-react";
 
 export default function App() {
@@ -55,6 +73,11 @@ export default function App() {
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [isNotificationOpen, setIsNotificationOpen] = useState(false);
 
+  // --- VISIBILITY & SYNC STATES ---
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const [isVisible, setIsVisible] = useState(document.visibilityState === "visible");
+  const [isSyncing, setIsSyncing] = useState(false);
+
   // --- SPECIAL INTERACTIVE STATES ---
   const [editingInspection, setEditingInspection] = useState<Inspection | null>(null);
   const [reportSelectedInspectionId, setReportSelectedInspectionId] = useState<string | null>(null);
@@ -68,9 +91,10 @@ export default function App() {
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
 
-  // --- GLOBAL SEARCH STATES ---
+  // --- GLOBAL SEARCH & MONTH FILTER STATES ---
   const [globalSearchTerm, setGlobalSearchTerm] = useState("");
   const [viewingGlobalInspection, setViewingGlobalInspection] = useState<Inspection | null>(null);
+  const [selectedMonth, setSelectedMonth] = useState<string>("auto");
 
   const globalSearchResults = useMemo(() => {
     const term = globalSearchTerm.trim().toLowerCase();
@@ -112,6 +136,98 @@ export default function App() {
     return () => window.removeEventListener("gemba_fta_db_update", handleDbUpdate);
   }, []);
 
+  // Centralized Visibility, Online, and Tab Page event listeners
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      setIsVisible(document.visibilityState === "visible");
+    };
+
+    const handlePageShow = () => {
+      setIsVisible(true);
+    };
+
+    const handlePageHide = () => {
+      setIsVisible(false);
+    };
+
+    const handleOnline = () => {
+      setIsOnline(true);
+    };
+
+    const handleOffline = () => {
+      setIsOnline(false);
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("pageshow", handlePageShow);
+    window.addEventListener("pagehide", handlePageHide);
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+
+    // HMR Dispose listener for development
+    if ((import.meta as any).hot) {
+      (import.meta as any).hot.dispose(() => {
+        dbService.stopSync(false);
+      });
+    }
+
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("pageshow", handlePageShow);
+      window.removeEventListener("pagehide", handlePageHide);
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  }, []);
+
+  // Debounce ref to manage and throttle dynamic listener synchronization
+  const syncTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Centralized dynamic listener synchronization manager
+  useEffect(() => {
+    // Clear any pending sync execution to prevent overlapping/duplicate listeners
+    if (syncTimeoutRef.current) {
+      clearTimeout(syncTimeoutRef.current);
+      syncTimeoutRef.current = null;
+    }
+
+    if (!currentUser) {
+      dbService.stopSync(true); // Logout: clear cache & cancel listeners
+      setIsSyncing(false);
+      return;
+    }
+
+    if (!isVisible || !isOnline) {
+      dbService.stopSync(false); // Hidden/Offline: cancel listeners, keep cache
+      setIsSyncing(false);
+      return;
+    }
+
+    // visible + online + authenticated: Set syncing state and schedule synchronization with a 1-second debounce
+    setIsSyncing(true);
+
+    syncTimeoutRef.current = setTimeout(() => {
+      // Ensure any previously active listeners are stopped right before starting new ones to prevent leaks
+      dbService.stopSync(false);
+
+      // Preload metadata (now cached internally to prevent repeating getDocs)
+      dbService.preloadMetadata().then(() => {
+        refreshDatabaseStates();
+      });
+
+      dbService.startSync(currentUser, activeTab);
+      refreshDatabaseStates();
+
+      setIsSyncing(false);
+    }, 1000);
+
+    return () => {
+      if (syncTimeoutRef.current) {
+        clearTimeout(syncTimeoutRef.current);
+      }
+    };
+  }, [currentUser?.id, activeTab, isVisible, isOnline]);
+
   // Firebase Authentication is the only session source. Firestore listeners start
   // only after authentication, avoiding permission errors on the login screen.
   useEffect(() => {
@@ -124,21 +240,42 @@ export default function App() {
       setAuthLoading(true);
       try {
         if (!firebaseUser) {
-          dbService.stopSync();
+          dbService.stopSync(true);
           setCurrentUser(null);
           setAuthLoading(false);
           return;
         }
         const profileSnap = await getDoc(doc(db, "users", firebaseUser.uid));
+        let profile: UserProfile;
+
         if (!profileSnap.exists()) {
-          await signOut(auth);
-          setLoginError("Seu acesso foi autenticado, mas o perfil ainda não está configurado.");
-          setAuthLoading(false);
-          return;
+          if (firebaseUser.email === "visitante@grupofta.com.br") {
+            const visitorData = {
+              id: firebaseUser.uid,
+              nome: "Visitante FTA",
+              email: "visitante@grupofta.com.br",
+              perfil: "visitante",
+              ativo: true
+            };
+            try {
+              await setDoc(doc(db, "users", firebaseUser.uid), visitorData);
+              profile = visitorData as UserProfile;
+            } catch (err) {
+              console.warn("Falha ao salvar perfil de visitante no Firestore (regras pendentes). Usando em memória.", err);
+              profile = visitorData as UserProfile;
+            }
+          } else {
+            await signOut(auth);
+            setLoginError("Seu acesso foi autenticado, mas o perfil ainda não está configurado.");
+            setAuthLoading(false);
+            return;
+          }
+        } else {
+          const rawProfile: any = { id: profileSnap.id, ...profileSnap.data() };
+          const normalizedPerfil = rawProfile.perfil === "desenvolvedor" ? "Desenvolvedor/Admin" : rawProfile.perfil === "admin" ? "Administrador" : rawProfile.perfil === "gestor" ? "Gestor" : rawProfile.perfil === "supervisor" ? "Supervisor" : rawProfile.perfil;
+          profile = { ...rawProfile, perfil: normalizedPerfil } as UserProfile;
         }
-        const rawProfile: any = { id: profileSnap.id, ...profileSnap.data() };
-        const normalizedPerfil = rawProfile.perfil === "desenvolvedor" ? "Desenvolvedor/Admin" : rawProfile.perfil === "admin" ? "Administrador" : rawProfile.perfil === "gestor" ? "Gestor" : rawProfile.perfil === "supervisor" ? "Supervisor" : rawProfile.perfil;
-        const profile = { ...rawProfile, perfil: normalizedPerfil } as UserProfile;
+
         if (!profile.ativo) {
           await signOut(auth);
           setLoginError("Seu acesso está inativo. Entre em contato com o administrador.");
@@ -146,8 +283,33 @@ export default function App() {
           return;
         }
         setCurrentUser(profile);
-        dbService.startSync(profile);
-        await updateDoc(doc(db, "users", firebaseUser.uid), { ultimoLogin: serverTimestamp() }).catch(() => undefined);
+        
+        let shouldUpdateLogin = true;
+        if (profile && profile.ultimoLogin) {
+          try {
+            let lastLoginDate: Date | null = null;
+            if (profile.ultimoLogin && typeof profile.ultimoLogin.toDate === "function") {
+              lastLoginDate = profile.ultimoLogin.toDate();
+            } else if (profile.ultimoLogin && typeof profile.ultimoLogin === "object" && (profile.ultimoLogin as any).seconds) {
+              lastLoginDate = new Date((profile.ultimoLogin as any).seconds * 1000);
+            } else if (profile.ultimoLogin) {
+              lastLoginDate = new Date(profile.ultimoLogin);
+            }
+            if (lastLoginDate && !isNaN(lastLoginDate.getTime())) {
+              const diffMs = Date.now() - lastLoginDate.getTime();
+              // Grava no máximo uma vez a cada 24 horas (86400000 ms)
+              if (diffMs < 24 * 60 * 60 * 1000) {
+                shouldUpdateLogin = false;
+              }
+            }
+          } catch (e) {
+            console.warn("Erro ao ler ultimoLogin do perfil:", e);
+          }
+        }
+
+        if (shouldUpdateLogin) {
+          await updateDoc(doc(db, "users", firebaseUser.uid), { ultimoLogin: serverTimestamp() }).catch(() => undefined);
+        }
         setTimeout(refreshDatabaseStates, 100);
       } catch (error) {
         console.error(error);
@@ -187,6 +349,7 @@ export default function App() {
     } catch (error: any) {
       console.error(error);
       triggerAlert(error?.message || "Não foi possível salvar a inspeção.", "error");
+      throw error;
     }
   };
 
@@ -235,9 +398,25 @@ export default function App() {
   };
 
   // Open individual inspection report inside Relatorios View
-  const handleSelectInspectionReport = (id: string) => {
+  const handleSelectInspectionReport = async (id: string) => {
     setReportSelectedInspectionId(id);
     setActiveTab("relatorios");
+
+    // On-demand loading of selected report if not already loaded in the preloaded inspections list
+    const alreadyLoaded = inspections.some(i => i.id === id);
+    if (!alreadyLoaded) {
+      try {
+        const fetched = await dbService.getInspectionById(id);
+        if (fetched) {
+          setInspections(prev => {
+            if (prev.some(i => i.id === fetched.id)) return prev;
+            return [fetched, ...prev];
+          });
+        }
+      } catch (err) {
+        console.error("Erro ao carregar relatório selecionado sob demanda:", err);
+      }
+    }
   };
 
   const handleEditInspectionInitiate = (inspection: Inspection) => {
@@ -396,7 +575,7 @@ export default function App() {
         currentUser={currentUser}
         onLogout={async () => {
           await signOut(auth);
-          dbService.stopSync();
+          dbService.stopSync(true);
           setCurrentUser(null);
           setActiveTab("dashboard");
           triggerAlert("Sessão encerrada com sucesso.", "success");
@@ -422,6 +601,12 @@ export default function App() {
                 SISTEMA DE GESTÃO GEMBA
               </span>
             </div>
+            {isSyncing && (
+              <div className="ml-2.5 flex items-center gap-1.5 px-2.5 py-1 bg-blue-50 border border-blue-100 rounded-full animate-pulse">
+                <span className="w-1.5 h-1.5 bg-blue-600 rounded-full"></span>
+                <span className="text-[9px] text-blue-600 font-extrabold tracking-wider uppercase">Sincronizando...</span>
+              </div>
+            )}
           </div>
 
           {/* Centered Global Search Input */}
@@ -601,12 +786,14 @@ export default function App() {
                 supervisors={supervisors}
                 areas={areas}
                 contracts={contracts}
+                selectedMonth={selectedMonth}
+                onSelectMonth={setSelectedMonth}
                 onEditInspection={handleEditInspectionInitiate}
                 onSelectTab={setActiveTab}
               />
             )}
 
-            {activeTab === "lancar" && (
+            {activeTab === "lancar" && currentUser?.perfil !== "visitante" && (
               <LancarInspecaoView
                 supervisors={supervisors}
                 areas={areas}
@@ -625,6 +812,8 @@ export default function App() {
                 supervisors={supervisors}
                 areas={areas}
                 contracts={contracts}
+                selectedMonth={selectedMonth}
+                onSelectMonth={setSelectedMonth}
                 onEdit={handleEditInspectionInitiate}
                 onDelete={handleDeleteInspection}
                 onMarkAsDone={handleMarkAsDone}
@@ -645,10 +834,15 @@ export default function App() {
             )}
 
             {activeTab === "ranking" && (
-              <RankingView inspections={inspections} supervisors={supervisors} />
+              <RankingView
+                inspections={inspections}
+                supervisors={supervisors}
+                selectedMonth={selectedMonth}
+                onSelectMonth={setSelectedMonth}
+              />
             )}
 
-            {activeTab === "exportacoes" && (
+            {activeTab === "exportacoes" && currentUser?.perfil !== "visitante" && (
               <ExportacoesView
                 inspections={inspections}
                 supervisors={supervisors}
@@ -657,7 +851,7 @@ export default function App() {
               />
             )}
 
-            {activeTab === "configuracoes" && (
+            {activeTab === "configuracoes" && currentUser?.perfil !== "visitante" && (
               <ConfiguracoesView
                 supervisors={supervisors}
                 areas={areas}
@@ -672,17 +866,24 @@ export default function App() {
         </main>
 
         {/* HIGH-DENSITY SYSTEM FOOTER */}
-        <footer className="h-8 bg-[#0B2E59] flex items-center px-6 justify-between shrink-0 text-white text-[9px] font-bold tracking-wider border-t border-[#092241] select-none uppercase no-print">
-          <div>
-            {config.nomeEmpresa} Serviços Industriais &copy; {new Date().getFullYear()} - {config.nomeSistema}
+        <footer className="app-footer no-print">
+          <div className="app-footer-company">
+            {config.nomeEmpresa} &copy; {new Date().getFullYear()} — {config.nomeSistema}
           </div>
-          <div className="flex items-center gap-3">
-            <span className="flex items-center gap-1.5 text-green-400">
+
+          <div className="app-footer-developer">
+            <span className="developer-icon">&lt;/&gt;</span>
+            DESENVOLVIDO POR ARTHUR SANTOS
+            <span className="footer-mobile-status items-center gap-1 text-green-400 ml-1.5 hidden">
               <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
-              Firebase sincronizado em tempo real
+              ONLINE
             </span>
-            <span className="text-gray-400">|</span>
-            <span className="text-orange-400 font-extrabold">Acesso: {currentUser?.nome} ({currentUser?.perfil})</span>
+          </div>
+
+          <div className="app-footer-status">
+            <span className="firebase-status">● FIREBASE SINCRONIZADO EM TEMPO REAL</span>
+            <span className="footer-separator">|</span>
+            <span className="access-status">ACESSO: {currentUser?.nome || "USUÁRIO"} ({currentUser?.perfil || "PERFIL"})</span>
           </div>
         </footer>
       </div>
@@ -789,13 +990,25 @@ export default function App() {
                   <div className="grid grid-cols-2 gap-3">
                     {viewingGlobalInspection.fotosAntes && viewingGlobalInspection.fotosAntes.map((pic, idx) => (
                       <div key={idx} className="relative rounded-lg overflow-hidden border border-gray-100 bg-slate-50 h-28 flex flex-col justify-between">
-                        <img src={pic} alt="Antes" className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                        <ResolvedImage
+                          src={pic}
+                          rotation={viewingGlobalInspection.rotacoesFotosAntes ? viewingGlobalInspection.rotacoesFotosAntes[idx] || 0 : 0}
+                          alt="Antes"
+                          className="w-full h-full object-cover"
+                          referrerPolicy="no-referrer"
+                        />
                         <span className="absolute bottom-1 left-1 bg-red-600/95 text-white font-extrabold text-[8px] uppercase tracking-wider px-1.5 py-0.5 rounded">Antes</span>
                       </div>
                     ))}
                     {viewingGlobalInspection.fotosDepois && viewingGlobalInspection.fotosDepois.map((pic, idx) => (
                       <div key={idx} className="relative rounded-lg overflow-hidden border border-gray-100 bg-slate-50 h-28 flex flex-col justify-between">
-                        <img src={pic} alt="Depois" className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                        <ResolvedImage
+                          src={pic}
+                          rotation={viewingGlobalInspection.rotacoesFotosDepois ? viewingGlobalInspection.rotacoesFotosDepois[idx] || 0 : 0}
+                          alt="Depois"
+                          className="w-full h-full object-cover"
+                          referrerPolicy="no-referrer"
+                        />
                         <span className="absolute bottom-1 left-1 bg-green-600/95 text-white font-extrabold text-[8px] uppercase tracking-wider px-1.5 py-0.5 rounded">Depois</span>
                       </div>
                     ))}

@@ -88,6 +88,19 @@ export default function ConfiguracoesView({
     };
   }, []);
 
+  // Sync state values with incoming config prop changes
+  React.useEffect(() => {
+    if (config) {
+      setNomeEmpresa(config.nomeEmpresa || "");
+      setNomeSistema(config.nomeSistema || "");
+      setLogoUrl(config.logoUrl || "");
+      setResponsavelNome(config.responsavelAssinaturaNome || "");
+      setResponsavelCargo(config.responsavelAssinaturaCargo || "");
+      if (config.tiposInspecao) setTiposInspecao(config.tiposInspecao);
+      if (config.processosChecklist) setProcessosChecklist(config.processosChecklist);
+    }
+  }, [config]);
+
   // --- EDIT MODAL STATES ---
   const [editModalOpen, setEditModalOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<{
@@ -97,9 +110,9 @@ export default function ConfiguracoesView({
   } | null>(null);
 
   // --- IDENTIDADE STATES ---
-  const [nomeEmpresa, setNomeEmpresa] = useState(config.nomeEmpresa);
-  const [nomeSistema, setNomeSistema] = useState(config.nomeSistema);
-  const [logoUrl, setLogoUrl] = useState(config.logoUrl);
+  const [nomeEmpresa, setNomeEmpresa] = useState(config.nomeEmpresa || "");
+  const [nomeSistema, setNomeSistema] = useState(config.nomeSistema || "");
+  const [logoUrl, setLogoUrl] = useState(config.logoUrl || "");
 
   // --- SIGNATURE STATES ---
   const [responsavelNome, setResponsavelNome] = useState(config.responsavelAssinaturaNome || "Jhonata Santos");
@@ -113,10 +126,10 @@ export default function ConfiguracoesView({
     "Interdição"
   ]);
   const [processosChecklist, setProcessosChecklist] = useState<ProcessoChecklist[]>(config.processosChecklist || [
-    { id: "p1", nome: "DSS", classificacaoPadrao: "Desvio Comportamental" },
-    { id: "p2", nome: "AR", classificacaoPadrao: "Desvio Estrutural" },
-    { id: "p3", nome: "LVCC", classificacaoPadrao: "Notificação" },
-    { id: "p4", nome: "DIAL", classificacaoPadrao: "Interdição" }
+    { id: "p1", nome: "DSS", classificacaoPadrao: "DSS" },
+    { id: "p2", nome: "AR", classificacaoPadrao: "AR" },
+    { id: "p3", nome: "LVCC", classificacaoPadrao: "LVCC" },
+    { id: "p4", nome: "DIAL", classificacaoPadrao: "DIAL" }
   ]);
 
   // Temporary local inputs

@@ -27,6 +27,10 @@ export interface Inspection {
   contratoId: string;
   atividade: string;
   tipo: string;
+  tipoLancamento?: string;
+  criadoPorUid?: string;
+  criadoPorNome?: string;
+  criadoPorEmail?: string;
   potencial: Potential;
   descricao: string;
   acaoCorretiva: string;
@@ -55,6 +59,7 @@ export interface Supervisor {
   metaMensal?: number;
   tipoMeta?: string;
   ativo?: boolean;
+  participaFarolGemba?: boolean;
 }
 
 export interface Area {
@@ -90,6 +95,7 @@ export interface UserProfile {
   perfil: string;
   cargo?: string;
   ativo: boolean;
+  participaFarolGemba?: boolean;
   primeiroAcesso?: boolean;
   deveAlterarSenha?: boolean;
   ultimoLogin?: any;
@@ -113,46 +119,53 @@ export interface AuthorizedEmail {
   ativo?: boolean;
 }
 
-export function isDialInspection(i?: { atividade?: string; tipo?: string } | null): boolean {
-  if (!i) return false;
-  const act = (i.atividade || "").trim().toLowerCase();
-  const tp = (i.tipo || "").trim().toLowerCase();
-  return act.includes("dial") || tp.includes("dial") || i.atividade === "DIAL" || i.tipo === "DIAL";
+export function getTipoLancamento(
+  atividadeOrObj: string | Partial<Inspection> = "",
+  tipo: string = "",
+  tipoLancamento: string = ""
+): string {
+  let ativ = "";
+  let tp = "";
+  let tLanc = "";
+
+  if (typeof atividadeOrObj === "object" && atividadeOrObj !== null) {
+    ativ = atividadeOrObj.atividade || "";
+    tp = atividadeOrObj.tipo || "";
+    tLanc = (atividadeOrObj as any).tipoLancamento || "";
+  } else {
+    ativ = typeof atividadeOrObj === "string" ? atividadeOrObj : "";
+    tp = tipo || "";
+    tLanc = tipoLancamento || "";
+  }
+
+  // Ordem de prioridade estrita:
+  // 1. tipoLancamento
+  // 2. tipo
+  // 3. atividade
+  const chosenRaw = (tLanc || "").trim() || (tp || "").trim() || (ativ || "").trim();
+  const low = chosenRaw.toLowerCase();
+
+  if (low.includes("dss") || chosenRaw === "DSS") return "DSS";
+  if (low.includes("presenca") || low.includes("presença") || chosenRaw === "Presença em Campo") return "Presença em Campo";
+  if (low.includes("ar") || chosenRaw === "AR") return "AR";
+  if (low.includes("lvcc") || chosenRaw === "LVCC") return "LVCC";
+  if (low.includes("desvio comportamental") || chosenRaw === "Desvio Comportamental") return "Desvio Comportamental";
+  if (low.includes("dial") || chosenRaw === "DIAL") return "DIAL";
+  if (low.includes("desvio estrutural") || chosenRaw === "Desvio Estrutural") return "Desvio Estrutural";
+  if (low.includes("notificacao") || low.includes("notificação") || chosenRaw === "Notificação") return "Notificação";
+  if (low.includes("interdicao") || low.includes("interdição") || chosenRaw === "Interdição") return "Interdição";
+
+  return chosenRaw || "Outros";
 }
 
-export function isDesvioComportamentalInspection(i?: { atividade?: string; tipo?: string } | null): boolean {
+export function isDialInspection(i?: Partial<Inspection> | { atividade?: string; tipo?: string; tipoLancamento?: string } | null): boolean {
   if (!i) return false;
-  const act = (i.atividade || "").trim().toLowerCase();
-  const tp = (i.tipo || "").trim().toLowerCase();
-  return act.includes("desvio comportamental") || tp.includes("desvio comportamental") || i.atividade === "Desvio Comportamental" || i.tipo === "Desvio Comportamental";
+  return getTipoLancamento(i.atividade, i.tipo, (i as any).tipoLancamento) === "DIAL";
 }
 
-export function getTipoLancamento(atividade: string = "", tipo: string = ""): string {
-  const act = (atividade || "").trim().toLowerCase();
-  const tp = (tipo || "").trim().toLowerCase();
-
-  if (act.includes("dss") || tp.includes("dss")) return "DSS";
-  if (act.includes("presenca") || tp.includes("presenca") || act.includes("presença") || tp.includes("presença")) return "Presença em Campo";
-  if (act.includes("ar") || tp.includes("ar")) return "AR";
-  if (act.includes("lvcc") || tp.includes("lvcc")) return "LVCC";
-  if (act.includes("dial") || tp.includes("dial")) return "DIAL";
-  if (act.includes("desvio comportamental") || tp.includes("desvio comportamental")) return "Desvio Comportamental";
-  if (act.includes("desvio estrutural") || tp.includes("desvio estrutural")) return "Desvio Estrutural";
-  if (act.includes("notificacao") || tp.includes("notificacao") || act.includes("notificação") || tp.includes("notificação")) return "Notificação";
-  if (act.includes("interdicao") || tp.includes("interdicao") || act.includes("interdição") || tp.includes("interdição")) return "Interdição";
-
-  // Fallbacks using exact match if any
-  if (atividade === "DSS" || tipo === "DSS") return "DSS";
-  if (atividade === "AR" || tipo === "AR") return "AR";
-  if (atividade === "LVCC" || tipo === "LVCC") return "LVCC";
-  if (atividade === "DIAL" || tipo === "DIAL") return "DIAL";
-  if (atividade === "Desvio Comportamental" || tipo === "Desvio Comportamental") return "Desvio Comportamental";
-  if (atividade === "Desvio Estrutural" || tipo === "Desvio Estrutural") return "Desvio Estrutural";
-  if (atividade === "Notificação" || tipo === "Notificação") return "Notificação";
-  if (atividade === "Interdição" || tipo === "Interdição") return "Interdição";
-  if (atividade === "Presença em Campo" || tipo === "Presença em Campo") return "Presença em Campo";
-
-  return atividade || tipo || "Outros";
+export function isDesvioComportamentalInspection(i?: Partial<Inspection> | { atividade?: string; tipo?: string; tipoLancamento?: string } | null): boolean {
+  if (!i) return false;
+  return getTipoLancamento(i.atividade, i.tipo, (i as any).tipoLancamento) === "Desvio Comportamental";
 }
 
 export const TIPO_LANCAMENTO_CONFIG: Record<string, {

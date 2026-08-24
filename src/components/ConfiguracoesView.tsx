@@ -34,6 +34,7 @@ import {
   PlusCircle
 } from "lucide-react";
 import { dbService } from "../services/db";
+import { deveParticiparFarolGemba, NAO_PARTICIPANTES_FAROL_GEMBA } from "../utils/operational";
 
 interface ConfiguracoesViewProps {
   supervisors: Supervisor[];
@@ -74,7 +75,7 @@ export default function ConfiguracoesView({
 
   // --- AUTHORIZED EMAILS STATES ---
   const [newAuthEmail, setNewAuthEmail] = useState("");
-  const [newAuthPerfil, setNewAuthPerfil] = useState<"Gestor" | "Supervisor" | "Administrador">("Supervisor");
+  const [newAuthPerfil, setNewAuthPerfil] = useState<"Gestor" | "Supervisor" | "Administrador" | "Líder de Equipe">("Supervisor");
   const [authorizedEmails, setAuthorizedEmails] = useState(dbService.getAuthorizedEmails());
 
   // Listen to authorized emails updates from db custom events
@@ -144,8 +145,9 @@ export default function ConfiguracoesView({
   const [userModalEmail, setUserModalEmail] = useState("");
   const [userModalCargo, setUserModalCargo] = useState("");
   const [userModalPassword, setUserModalPassword] = useState("");
-  const [userModalPerfil, setUserModalPerfil] = useState<"Desenvolvedor/Admin" | "Supervisor" | "Gestor">("Supervisor");
+  const [userModalPerfil, setUserModalPerfil] = useState<"Desenvolvedor/Admin" | "Supervisor" | "Gestor" | "Líder de Equipe">("Supervisor");
   const [userModalStatus, setUserModalStatus] = useState<"Ativo" | "Inativo">("Ativo");
+  const [userModalParticipaFarolGemba, setUserModalParticipaFarolGemba] = useState<boolean>(true);
 
   // --- SEED ENABLERS ---
   const showSuccess = (msg: string) => {
@@ -162,11 +164,14 @@ export default function ConfiguracoesView({
   const handleAddSupervisor = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newSupNome.trim()) return;
+    const nomeTrim = newSupNome.trim();
+    const isExcluded = !deveParticiparFarolGemba({ nome: nomeTrim });
     const newSup: Supervisor = {
       id: "sup_" + Math.random().toString(36).substring(2, 9),
-      nome: newSupNome.trim(),
+      nome: nomeTrim,
       email: newSupEmail.trim() || undefined,
-      ativo: true
+      ativo: true,
+      participaFarolGemba: !isExcluded
     };
     try {
       await dbService.saveSupervisor(newSup);
@@ -309,7 +314,11 @@ export default function ConfiguracoesView({
     if (type === "supervisor") {
       const sup = supervisors.find(s => s.id === id);
       if (sup) {
-        fields = { nome: sup.nome, email: sup.email || "" };
+        fields = {
+          nome: sup.nome,
+          email: sup.email || "",
+          participaFarolGemba: sup.participaFarolGemba !== false && deveParticiparFarolGemba(sup)
+        };
       }
     } else if (type === "area") {
       const ar = areas.find(a => a.id === id);
@@ -340,7 +349,8 @@ export default function ConfiguracoesView({
       if (type === "supervisor") {
         await dbService.updateSupervisor(id, {
           nome: fields.nome,
-          email: fields.email || ""
+          email: fields.email || "",
+          participaFarolGemba: fields.participaFarolGemba === true
         });
         showSuccess("Supervisor atualizado com sucesso!");
       } else if (type === "area") {
@@ -446,6 +456,7 @@ export default function ConfiguracoesView({
     setUserModalPassword("");
     setUserModalPerfil("Supervisor");
     setUserModalStatus("Ativo");
+    setUserModalParticipaFarolGemba(true);
     setUserModalOpen(true);
   };
 
@@ -457,6 +468,7 @@ export default function ConfiguracoesView({
     setUserModalPassword("");
     setUserModalPerfil(u.perfil === "Administrador" ? "Desenvolvedor/Admin" : (u.perfil as any));
     setUserModalStatus(u.ativo ? "Ativo" : "Inativo");
+    setUserModalParticipaFarolGemba(u.participaFarolGemba !== false && deveParticiparFarolGemba(u));
     setUserModalOpen(true);
   };
 
@@ -520,10 +532,22 @@ export default function ConfiguracoesView({
         cargo: cargoTrim || undefined,
         perfil: userModalPerfil,
         ativo: userModalStatus === "Ativo",
+        participaFarolGemba: userModalParticipaFarolGemba,
         primeiroAcesso: editingUser?.primeiroAcesso ?? true,
         deveAlterarSenha: editingUser?.deveAlterarSenha ?? true
       };
       await dbService.saveUser(savedUser);
+
+      // If user is a Supervisor or has a supervisor record, keep it synchronized
+      const matchingSup = supervisors.find(
+        (s) => (s.email && s.email.toLowerCase() === emailLower) || s.nome.toLowerCase() === nomeTrim.toLowerCase()
+      );
+      if (matchingSup) {
+        await dbService.updateSupervisor(matchingSup.id, {
+          participaFarolGemba: userModalParticipaFarolGemba
+        });
+      }
+
       setUserModalOpen(false);
       setUserModalPassword("");
       onRefreshDB();
@@ -752,7 +776,18 @@ export default function ConfiguracoesView({
                 {supervisors.map((s) => (
                   <div key={s.id} className="py-2.5 flex items-center justify-between text-xs">
                     <div className="flex flex-col">
-                      <span className="font-bold text-gray-800">{s.nome}</span>
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="font-bold text-gray-800">{s.nome}</span>
+                        {s.participaFarolGemba === false || !deveParticiparFarolGemba(s) ? (
+                          <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-50 text-amber-700 border border-amber-200">
+                            Sem Farol
+                          </span>
+                        ) : (
+                          <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-blue-50 text-[#0B2E59] border border-blue-100">
+                            Farol GEMBA
+                          </span>
+                        )}
+                      </div>
                       <span className="text-gray-400 text-[10px]">{s.email || "Sem e-mail cadastrado"}</span>
                     </div>
                     <div className="flex items-center gap-1">
@@ -953,6 +988,7 @@ export default function ConfiguracoesView({
                   <th className="p-3">Nome</th>
                   <th className="p-3">E-mail de Acesso</th>
                   <th className="p-3">Perfil de Permissão</th>
+                  <th className="p-3 text-center">Farol GEMBA</th>
                   <th className="p-3 text-center">Status</th>
                   <th className="p-3 text-center">Ações</th>
                 </tr>
@@ -970,6 +1006,15 @@ export default function ConfiguracoesView({
                     <td className="p-3">
                       <span className="px-2 py-0.5 bg-blue-50 text-[#0B2E59] font-bold rounded">
                         {u.perfil}
+                      </span>
+                    </td>
+                    <td className="p-3 text-center">
+                      <span className={`inline-block px-1.5 py-0.5 rounded font-extrabold text-[10px] ${
+                        u.participaFarolGemba === false || !deveParticiparFarolGemba(u)
+                          ? "bg-amber-50 text-amber-700 border border-amber-200"
+                          : "bg-blue-50 text-[#0B2E59] border border-blue-100"
+                      }`}>
+                        {u.participaFarolGemba === false || !deveParticiparFarolGemba(u) ? "Não Participa" : "Participa"}
                       </span>
                     </td>
                     <td className="p-3 text-center">
@@ -1039,6 +1084,7 @@ export default function ConfiguracoesView({
                   onChange={(e) => setNewAuthPerfil(e.target.value as any)}
                   className="bg-slate-50 border border-slate-200 rounded-lg p-2 text-xs text-gray-700 focus:outline-none focus:ring-1 focus:ring-[#0B2E59]"
                 >
+                  <option value="Líder de Equipe">Líder de Equipe</option>
                   <option value="Supervisor">Supervisor</option>
                   <option value="Gestor">Gestor</option>
                   <option value="Administrador">Administrador</option>
@@ -1472,6 +1518,49 @@ export default function ConfiguracoesView({
                       className="bg-gray-50 border border-gray-200 rounded-lg p-2.5 text-gray-700 focus:outline-none"
                     />
                   </div>
+                  <div className="flex flex-col gap-1">
+                    <label className="font-bold text-gray-600">Participação no Farol GEMBA</label>
+                    <div className="grid grid-cols-2 gap-2 mt-1">
+                      <label className={`flex items-center justify-center p-2 rounded-lg border cursor-pointer font-bold text-xs ${
+                        editTarget.fields.participaFarolGemba !== false
+                          ? "border-[#0B2E59] bg-blue-50/50 text-[#0B2E59]"
+                          : "border-gray-200 text-gray-600"
+                      }`}>
+                        <input
+                          type="radio"
+                          name="editSupParticipaFarol"
+                          checked={editTarget.fields.participaFarolGemba !== false}
+                          onChange={() =>
+                            setEditTarget({
+                              ...editTarget,
+                              fields: { ...editTarget.fields, participaFarolGemba: true }
+                            })
+                          }
+                          className="sr-only"
+                        />
+                        Sim (Participa)
+                      </label>
+                      <label className={`flex items-center justify-center p-2 rounded-lg border cursor-pointer font-bold text-xs ${
+                        editTarget.fields.participaFarolGemba === false
+                          ? "border-orange-500 bg-orange-50/50 text-orange-700"
+                          : "border-gray-200 text-gray-600"
+                      }`}>
+                        <input
+                          type="radio"
+                          name="editSupParticipaFarol"
+                          checked={editTarget.fields.participaFarolGemba === false}
+                          onChange={() =>
+                            setEditTarget({
+                              ...editTarget,
+                              fields: { ...editTarget.fields, participaFarolGemba: false }
+                            })
+                          }
+                          className="sr-only"
+                        />
+                        Não (Não participa)
+                      </label>
+                    </div>
+                  </div>
                 </>
               )}
 
@@ -1560,6 +1649,7 @@ export default function ConfiguracoesView({
                       }
                       className="bg-gray-50 border border-gray-200 rounded-lg p-2.5 text-gray-700 focus:outline-none"
                     >
+                      <option value="Líder de Equipe">Líder de Equipe</option>
                       <option value="Supervisor">Supervisor</option>
                       <option value="Gestor">Gestor</option>
                       <option value="Administrador">Administrador</option>
@@ -1719,7 +1809,7 @@ export default function ConfiguracoesView({
               {/* Perfil de Permissão */}
               <div className="flex flex-col gap-1">
                 <label className="font-bold text-gray-600">Perfil de Permissão</label>
-                <div className="grid grid-cols-3 gap-2 mt-1">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-1">
                   <label className={`flex items-center justify-center p-2 rounded-lg border cursor-pointer font-bold gap-1 text-[11px] transition-all ${
                     userModalPerfil === "Desenvolvedor/Admin"
                       ? "border-[#0B2E59] bg-blue-50/50 text-[#0B2E59]"
@@ -1765,6 +1855,21 @@ export default function ConfiguracoesView({
                     />
                     Supervisor
                   </label>
+                  <label className={`flex items-center justify-center p-2 rounded-lg border cursor-pointer font-bold gap-1 text-[11px] transition-all ${
+                    userModalPerfil === "Líder de Equipe"
+                      ? "border-[#0B2E59] bg-blue-50/50 text-[#0B2E59]"
+                      : "border-gray-200 hover:border-gray-300 text-gray-600"
+                  }`}>
+                    <input
+                      type="radio"
+                      name="modalPerfil"
+                      value="Líder de Equipe"
+                      checked={userModalPerfil === "Líder de Equipe"}
+                      onChange={() => setUserModalPerfil("Líder de Equipe")}
+                      className="sr-only"
+                    />
+                    Líder de Equipe
+                  </label>
                 </div>
               </div>
 
@@ -1801,6 +1906,44 @@ export default function ConfiguracoesView({
                       className="sr-only"
                     />
                     Inativo
+                  </label>
+                </div>
+              </div>
+
+              {/* Participação no Farol GEMBA */}
+              <div className="flex flex-col gap-1">
+                <label className="font-bold text-gray-600">Participação no Farol GEMBA</label>
+                <p className="text-[10px] text-gray-400">
+                  Define se este usuário participa e aparece nas metas e linhas do Farol GEMBA.
+                </p>
+                <div className="grid grid-cols-2 gap-2 mt-1">
+                  <label className={`flex items-center justify-center p-2 rounded-lg border cursor-pointer font-bold text-xs ${
+                    userModalParticipaFarolGemba
+                      ? "border-[#0B2E59] bg-blue-50/50 text-[#0B2E59]"
+                      : "border-gray-200 text-gray-600"
+                  }`}>
+                    <input
+                      type="radio"
+                      name="modalParticipaFarol"
+                      checked={userModalParticipaFarolGemba}
+                      onChange={() => setUserModalParticipaFarolGemba(true)}
+                      className="sr-only"
+                    />
+                    Sim (Participa)
+                  </label>
+                  <label className={`flex items-center justify-center p-2 rounded-lg border cursor-pointer font-bold text-xs ${
+                    !userModalParticipaFarolGemba
+                      ? "border-orange-500 bg-orange-50/50 text-orange-700"
+                      : "border-gray-200 text-gray-600"
+                  }`}>
+                    <input
+                      type="radio"
+                      name="modalParticipaFarol"
+                      checked={!userModalParticipaFarolGemba}
+                      onChange={() => setUserModalParticipaFarolGemba(false)}
+                      className="sr-only"
+                    />
+                    Não (Não participa)
                   </label>
                 </div>
               </div>

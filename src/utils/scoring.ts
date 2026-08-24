@@ -23,7 +23,7 @@ export function getSingleInspectionScore(insp: Inspection): number {
   if (!insp) return 0;
   const act = (insp.atividade || "").toLowerCase();
   const tp = (insp.tipo || "").toLowerCase();
-  const launchType = getTipoLancamento(insp.atividade, insp.tipo);
+  const launchType = getTipoLancamento(insp.atividade, insp.tipo, insp.tipoLancamento);
 
   if (launchType === "Interdição" || act.includes("interdi") || tp.includes("interdi")) {
     return 4;

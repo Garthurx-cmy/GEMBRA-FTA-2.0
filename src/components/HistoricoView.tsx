@@ -251,10 +251,26 @@ export default function HistoricoView({
     refreshTrigger
   ]);
 
+  const isTeamLeader = currentUser?.perfil === "Líder de Equipe" || currentUser?.perfil === "Lider de Equipe";
+  const isOwnInspection = (item: Inspection) => {
+    if (!currentUser) return false;
+    if (item.criadoPorUid && item.criadoPorUid === currentUser.id) return true;
+    if (item.criadoPorEmail && currentUser.email && item.criadoPorEmail.toLowerCase() === currentUser.email.toLowerCase()) return true;
+    return false;
+  };
+  const canEditInspection = (item: Inspection) => {
+    if (!currentUser || currentUser.perfil === "visitante") return false;
+    if (isTeamLeader) return isOwnInspection(item);
+    return true;
+  };
+
   // Map filteredInspections to memoized list filtered by active month and criteria
   const filteredInspections = useMemo(() => {
     const list = inspections && inspections.length > 0 ? inspections : localInspections;
     return list.filter((item) => {
+      // Líder de Equipe: visualiza apenas os próprios lançamentos
+      if (isTeamLeader && !isOwnInspection(item)) return false;
+
       // Month filter
       if (activeMonth !== "all_months") {
         const monthKey = getInspectionMonthKey(item);
@@ -577,7 +593,7 @@ export default function HistoricoView({
                       </button>
 
                       {/* Editar */}
-                      {currentUser?.perfil !== "visitante" && (
+                      {canEditInspection(item) && (
                         <button
                           onClick={() => onEdit(item)}
                           className="p-1.5 text-orange-600 hover:bg-orange-50 rounded transition cursor-pointer"
@@ -588,7 +604,7 @@ export default function HistoricoView({
                       )}
 
                       {/* Marcar Concluido shortcut */}
-                      {currentUser?.perfil !== "visitante" && item.status !== InspectionStatus.CONCLUIDO && (
+                      {canEditInspection(item) && item.status !== InspectionStatus.CONCLUIDO && (
                         <button
                           onClick={() => onMarkAsDone(item.id)}
                           className="p-1.5 text-green-600 hover:bg-green-50 rounded transition cursor-pointer"

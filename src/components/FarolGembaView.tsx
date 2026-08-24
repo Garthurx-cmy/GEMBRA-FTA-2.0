@@ -116,7 +116,9 @@ export default function FarolGembaView({
   const rows = useMemo(() => {
     const monthInspections = getUniqueMonthlyInspections(inspections, activeMonth);
 
-    const activeSupervisors = supervisors.filter((sup) => sup.ativo !== false && isFarolVli(sup));
+    const activeSupervisors = supervisors.filter(
+      (sup) => sup.ativo !== false && sup.participaFarolGemba !== false && isFarolVli(sup)
+    );
     const displayedSupervisors = selectedSupervisorId && selectedSupervisorId !== "all"
       ? activeSupervisors.filter((s) => s.id === selectedSupervisorId)
       : activeSupervisors;
@@ -127,14 +129,14 @@ export default function FarolGembaView({
         const ownInsps = monthInspections.filter((i) => i.supervisorId === sup.id);
 
         // Individual type counts
-        const lvcc = ownInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "LVCC").length;
+        const lvcc = ownInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "LVCC").length;
         const dial = ownInsps.filter(isDialInspection).length;
-        const dss = ownInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "DSS").length;
-        const estrutural = ownInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "Desvio Estrutural").length;
-        const directPresenca = ownInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "Presença em Campo").length;
+        const dss = ownInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "DSS").length;
+        const estrutural = ownInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Desvio Estrutural").length;
+        const directPresenca = ownInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Presença em Campo").length;
         const comportamental = ownInsps.filter(isDesvioComportamentalInspection).length;
-        const notificacao = ownInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "Notificação").length;
-        const interdicao = ownInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "Interdição").length;
+        const notificacao = ownInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Notificação").length;
+        const interdicao = ownInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Interdição").length;
 
         // Presenca em campo column only counts actual "Presença em Campo" inspections
         const presencaEmCampo = ownInsps.filter(isPresencaEmCampo).length;

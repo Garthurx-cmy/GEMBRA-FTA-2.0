@@ -90,6 +90,7 @@ export default function App() {
   const [authLoading, setAuthLoading] = useState(true);
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
 
   // --- GLOBAL SEARCH & MONTH FILTER STATES ---
   const [globalSearchTerm, setGlobalSearchTerm] = useState("");
@@ -272,7 +273,14 @@ export default function App() {
           }
         } else {
           const rawProfile: any = { id: profileSnap.id, ...profileSnap.data() };
-          const normalizedPerfil = rawProfile.perfil === "desenvolvedor" ? "Desenvolvedor/Admin" : rawProfile.perfil === "admin" ? "Administrador" : rawProfile.perfil === "gestor" ? "Gestor" : rawProfile.perfil === "supervisor" ? "Supervisor" : rawProfile.perfil;
+          const p = (rawProfile.perfil || "").trim().toLowerCase();
+          const normalizedPerfil =
+            p === "desenvolvedor" || p === "desenvolvedor/admin" ? "Desenvolvedor/Admin" :
+            p === "admin" || p === "administrador" ? "Administrador" :
+            p === "gestor" ? "Gestor" :
+            p === "lider" || p === "líder" || p === "lider de equipe" || p === "líder de equipe" ? "Líder de Equipe" :
+            p === "supervisor" ? "Supervisor" :
+            rawProfile.perfil;
           profile = { ...rawProfile, perfil: normalizedPerfil } as UserProfile;
         }
 
@@ -559,6 +567,7 @@ export default function App() {
   }
 
   const unreadCount = notifications.filter((n) => !n.read).length;
+  const sidebarWidth = sidebarCollapsed ? 64 : 224;
 
   return (
     <div className="flex h-screen overflow-hidden bg-[#f8fafc] text-gray-800 font-sans">
@@ -573,6 +582,8 @@ export default function App() {
         }}
         config={config}
         currentUser={currentUser}
+        collapsed={sidebarCollapsed}
+        setCollapsed={setSidebarCollapsed}
         onLogout={async () => {
           await signOut(auth);
           dbService.stopSync(true);
@@ -777,7 +788,7 @@ export default function App() {
         </header>
 
         {/* SCREEN WORKSPACE INNER CONTAINER */}
-        <main className="flex-1 overflow-y-auto px-4 py-4 md:py-5 print:p-0">
+        <main className="flex-1 overflow-y-auto px-4 pt-4 pb-20 md:pt-5 md:pb-20 print:p-0">
           <div className="max-w-7xl mx-auto h-full">
             
             {activeTab === "dashboard" && (
@@ -851,7 +862,7 @@ export default function App() {
               />
             )}
 
-            {activeTab === "configuracoes" && currentUser?.perfil !== "visitante" && (
+            {activeTab === "configuracoes" && (currentUser?.perfil === "Desenvolvedor/Admin" || currentUser?.perfil === "Administrador") && (
               <ConfiguracoesView
                 supervisors={supervisors}
                 areas={areas}
@@ -866,7 +877,14 @@ export default function App() {
         </main>
 
         {/* HIGH-DENSITY SYSTEM FOOTER */}
-        <footer className="app-footer no-print">
+        <footer
+          id="app-footer"
+          className="app-footer no-print"
+          style={{
+            left: `${sidebarWidth}px`,
+            width: `calc(100% - ${sidebarWidth}px)`
+          }}
+        >
           <div className="app-footer-company">
             {config.nomeEmpresa} &copy; {new Date().getFullYear()} — {config.nomeSistema}
           </div>
@@ -874,16 +892,20 @@ export default function App() {
           <div className="app-footer-developer">
             <span className="developer-icon">&lt;/&gt;</span>
             DESENVOLVIDO POR ARTHUR SANTOS
-            <span className="footer-mobile-status items-center gap-1 text-green-400 ml-1.5 hidden">
-              <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
-              ONLINE
-            </span>
           </div>
 
           <div className="app-footer-status">
-            <span className="firebase-status">● FIREBASE SINCRONIZADO EM TEMPO REAL</span>
+            <span className="firebase-status">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shrink-0"></span>
+              FIREBASE SINCRONIZADO
+            </span>
             <span className="footer-separator">|</span>
-            <span className="access-status">ACESSO: {currentUser?.nome || "USUÁRIO"} ({currentUser?.perfil || "PERFIL"})</span>
+            <span
+              className="access-status truncate max-w-[130px] sm:max-w-[240px]"
+              title={`${currentUser?.nome || "USUÁRIO"} (${currentUser?.perfil || "PERFIL"})`}
+            >
+              ACESSO: {currentUser?.nome || "USUÁRIO"}
+            </span>
           </div>
         </footer>
       </div>

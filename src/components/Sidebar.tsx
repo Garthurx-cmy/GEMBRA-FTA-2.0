@@ -25,10 +25,22 @@ interface SidebarProps {
   config: SystemConfig;
   currentUser: UserProfile | null;
   onLogout: () => void;
+  collapsed?: boolean;
+  setCollapsed?: (collapsed: boolean) => void;
 }
 
-export default function Sidebar({ activeTab, setActiveTab, config, currentUser, onLogout }: SidebarProps) {
-  const [collapsed, setCollapsed] = useState(true);
+export default function Sidebar({
+  activeTab,
+  setActiveTab,
+  config,
+  currentUser,
+  onLogout,
+  collapsed: externalCollapsed,
+  setCollapsed: externalSetCollapsed
+}: SidebarProps) {
+  const [internalCollapsed, setInternalCollapsed] = useState(true);
+  const isCollapsed = externalCollapsed !== undefined ? externalCollapsed : internalCollapsed;
+  const setCollapsedState = externalSetCollapsed || setInternalCollapsed;
 
   const menuPrincipal = [
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -62,7 +74,7 @@ export default function Sidebar({ activeTab, setActiveTab, config, currentUser, 
             ? "border-l-4 border-[#F58220] bg-[#133e72] text-white font-bold rounded-r-md -ml-3 pl-2.5 shadow-sm"
             : "text-gray-300 hover:bg-[#133e72]/50 hover:text-white border-l-4 border-transparent -ml-3 pl-2.5"
         }`}
-        title={collapsed ? item.label : undefined}
+        title={isCollapsed ? item.label : undefined}
       >
         <IconComponent
           size={16}
@@ -70,7 +82,7 @@ export default function Sidebar({ activeTab, setActiveTab, config, currentUser, 
             isActive ? "scale-105 text-[#F58220]" : "text-gray-400 group-hover:text-white"
           }`}
         />
-        {!collapsed && (
+        {!isCollapsed && (
           <span className="truncate tracking-wide">{item.label}</span>
         )}
       </button>
@@ -80,16 +92,16 @@ export default function Sidebar({ activeTab, setActiveTab, config, currentUser, 
   return (
     <aside
       id="sidebar-container"
-      onMouseEnter={() => setCollapsed(false)}
-      onMouseLeave={() => setCollapsed(true)}
-      className={`bg-[#0B2E59] text-white flex flex-col justify-between transition-all duration-300 ease-in-out border-r border-[#082142] h-screen sticky top-0 z-20 select-none ${
-        collapsed ? "w-16" : "w-56"
+      onMouseEnter={() => setCollapsedState(false)}
+      onMouseLeave={() => setCollapsedState(true)}
+      className={`bg-[#0B2E59] text-white flex flex-col justify-between transition-all duration-300 ease-in-out border-r border-[#082142] h-screen sticky top-0 z-40 select-none ${
+        isCollapsed ? "w-16" : "w-56"
       }`}
     >
       {/* Top Brand Block */}
       <div className="flex flex-col">
         <div className="flex items-center justify-between px-3 py-3.5 border-b border-[#133e72] h-[52px]">
-          {!collapsed ? (
+          {!isCollapsed ? (
             <div className="flex items-center gap-2 overflow-hidden transition-all duration-300 animate-fade-in">
               {/* Fallback Mini-Logo if no logoUrl */}
               <div className="bg-[#F58220] text-white font-black text-sm rounded px-2 py-0.5 tracking-tighter flex items-center justify-center">
@@ -115,7 +127,7 @@ export default function Sidebar({ activeTab, setActiveTab, config, currentUser, 
         <div className="flex flex-col gap-4 px-3 py-4">
           {/* Menu Principal Group */}
           <div className="flex flex-col gap-1">
-            {!collapsed && (
+            {!isCollapsed && (
               <span className="text-[9px] uppercase font-bold tracking-wider text-gray-400 px-2.5 mb-1 select-none">
                 Menu Principal
               </span>
@@ -127,7 +139,7 @@ export default function Sidebar({ activeTab, setActiveTab, config, currentUser, 
 
           {/* Análise Group */}
           <div className="flex flex-col gap-1">
-            {!collapsed && (
+            {!isCollapsed && (
               <span className="text-[9px] uppercase font-bold tracking-wider text-gray-400 px-2.5 mb-1 select-none">
                 Análise e Gestão
               </span>
@@ -140,33 +152,51 @@ export default function Sidebar({ activeTab, setActiveTab, config, currentUser, 
       </div>
 
       {/* User Session Info Bottom Block */}
-      <div className="p-4 border-t border-[#133e72] bg-[#092548]">
-        <div className="flex items-center justify-between gap-2">
+      <div className="p-3 border-t border-[#133e72] bg-[#092548] pb-16 flex flex-col justify-center">
+        {!isCollapsed ? (
           <div className="flex items-center gap-2.5 min-w-0">
-            <div className="w-9 h-9 rounded-full bg-[#133e72] flex items-center justify-center border-2 border-[#F58220] text-white font-black shrink-0 text-xs uppercase">
-              {currentUser?.nome.substring(0, 2) || "U"}
+            {/* Avatar */}
+            <div className="w-9 h-9 rounded-full bg-[#133e72] flex items-center justify-center border-2 border-[#F58220] text-white font-black shrink-0 text-xs uppercase shadow-sm">
+              {currentUser?.nome?.substring(0, 2) || "U"}
             </div>
-            {!collapsed && (
-              <div className="flex flex-col min-w-0">
-                <span className="text-xs font-bold text-white truncate">
+
+            {/* User details and Logout button */}
+            <div className="flex flex-col min-w-0 flex-1">
+              <div className="flex items-center justify-between gap-1">
+                <span className="text-xs font-bold text-white truncate" title={currentUser?.nome || "Usuário"}>
                   {currentUser?.nome || "Usuário"}
                 </span>
-                <span className="text-[9px] text-[#F58220] font-bold truncate flex items-center gap-1">
-                  <ShieldCheck size={10} /> {currentUser?.perfil || "Supervisor"}
-                </span>
+                <button
+                  onClick={onLogout}
+                  className="p-1 text-gray-300 hover:text-red-400 hover:bg-white/10 rounded transition cursor-pointer shrink-0"
+                  title="Sair do aplicativo"
+                >
+                  <LogOut size={14} />
+                </button>
               </div>
-            )}
+              <span className="text-[9px] text-[#F58220] font-bold truncate flex items-center gap-1">
+                <ShieldCheck size={10} className="shrink-0" />
+                <span className="truncate">{currentUser?.perfil || "Supervisor"}</span>
+              </span>
+            </div>
           </div>
-          {!collapsed && (
+        ) : (
+          <div className="flex flex-col items-center gap-2">
+            <div
+              className="w-9 h-9 rounded-full bg-[#133e72] flex items-center justify-center border-2 border-[#F58220] text-white font-black shrink-0 text-xs uppercase shadow-sm"
+              title={`${currentUser?.nome || "Usuário"} (${currentUser?.perfil || "Supervisor"})`}
+            >
+              {currentUser?.nome?.substring(0, 2) || "U"}
+            </div>
             <button
               onClick={onLogout}
-              className="p-1 text-gray-400 hover:text-red-400 hover:bg-white/5 rounded transition cursor-pointer"
-              title="Fazer Logout"
+              className="p-1.5 text-gray-300 hover:text-red-400 hover:bg-white/10 rounded transition cursor-pointer"
+              title="Sair do aplicativo"
             >
-              <LogOut size={14} />
+              <LogOut size={15} />
             </button>
-          )}
-        </div>
+          </div>
+        )}
       </div>
     </aside>
   );

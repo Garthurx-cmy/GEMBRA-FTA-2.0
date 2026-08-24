@@ -8,7 +8,9 @@ service cloud.firestore {
       return active() && profile().perfil in ['Desenvolvedor/Admin', 'Administrador', 'desenvolvedor', 'admin'];
     }
     function manager() { return active() && profile().perfil in ['Gestor', 'gestor']; }
-    function operational() { return active() && profile().perfil in ['Supervisor', 'supervisor', 'Gestor', 'gestor', 'Administrador', 'admin', 'Desenvolvedor/Admin', 'desenvolvedor']; }
+    function supervisor() { return active() && profile().perfil in ['Supervisor', 'supervisor']; }
+    function teamLeader() { return active() && profile().perfil in ['Líder de Equipe', 'Lider de Equipe', 'lider_equipe', 'lider']; }
+    function operational() { return admin() || manager() || supervisor() || teamLeader(); }
     function visitor() { return active() && profile().perfil in ['Visitante', 'visitante']; }
 
     match /users/{uid} {
@@ -21,47 +23,68 @@ service cloud.firestore {
       );
       allow delete: if admin() && request.auth.uid != uid;
     }
+
     match /inspections/{id} {
       allow read: if active();
-      allow create, update: if operational() && !visitor() &&
+      allow create: if operational() && !visitor() &&
+        (
+          !teamLeader() ||
+          (request.resource.data.criadoPorUid == request.auth.uid)
+        ) &&
+        (!('fotosAntes' in request.resource.data) || request.resource.data.fotosAntes.size() <= 3) &&
+        (!('fotosDepois' in request.resource.data) || request.resource.data.fotosDepois.size() <= 3);
+      allow update: if operational() && !visitor() &&
+        (
+          admin() || manager() || supervisor() ||
+          (teamLeader() && resource.data.criadoPorUid == request.auth.uid && request.resource.data.criadoPorUid == resource.data.criadoPorUid)
+        ) &&
         (!('fotosAntes' in request.resource.data) || request.resource.data.fotosAntes.size() <= 3) &&
         (!('fotosDepois' in request.resource.data) || request.resource.data.fotosDepois.size() <= 3);
       allow delete: if admin();
     }
+
     match /supervisors/{id} {
       allow read: if active();
       allow write: if admin();
     }
+
     match /areas/{id} {
       allow read: if active();
       allow write: if admin();
     }
+
     match /contracts/{id} {
       allow read: if active();
       allow write: if admin();
     }
+
     match /settings/{id} {
       allow read: if active();
       allow write: if admin();
     }
+
     match /notifications/{id} {
       allow read: if active();
       allow create, update: if active() && !visitor();
       allow delete: if admin();
     }
+
     match /authorized_emails/{id} {
       allow read: if active();
       allow write: if admin();
     }
+
     match /deleted_names/{id} {
       allow read: if active();
       allow write: if admin();
     }
+
     match /auditLogs/{id} {
       allow read: if admin();
       allow create: if active();
       allow update, delete: if false;
     }
+
     match /{document=**} { allow read, write: if false; }
   }
 }

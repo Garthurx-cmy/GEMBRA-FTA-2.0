@@ -44,7 +44,7 @@ export default function RankingView({
   }, [inspections, activeMonth]);
 
   const rankingData = useMemo(() => supervisors
-    .filter((supervisor) => supervisor.ativo !== false && isFarolVli(supervisor))
+    .filter((supervisor) => supervisor.ativo !== false && supervisor.participaFarolGemba !== false && isFarolVli(supervisor))
     .map((supervisor) => {
       // Filter inspections belonging exclusively to the selected month and supervisor
       const month = monthlyInspections.filter((item) => item.supervisorId === supervisor.id);

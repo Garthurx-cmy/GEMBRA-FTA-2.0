@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useEffect } from "react";
+import { auth } from "../services/firebase";
 import {
   Potential,
   InspectionStatus,
@@ -142,12 +143,13 @@ export default function LancarInspecaoView({
   // Load editing inspection data if provided
   useEffect(() => {
     if (editingInspection) {
+      const initialTipo = editingInspection.tipoLancamento || getTipoLancamento(editingInspection.atividade, editingInspection.tipo, editingInspection.tipoLancamento);
       setData(editingInspection.data || "");
       setSupervisorId(editingInspection.supervisorId || "");
       setAreaId(editingInspection.areaId || "");
       setContratoId(editingInspection.contratoId || "");
-      setAtividade(editingInspection.atividade || "");
-      setTipo(editingInspection.tipo || "");
+      setAtividade(initialTipo);
+      setTipo(initialTipo);
       setPotencial(editingInspection.potencial || "LEVE" as any);
       setDescricao(editingInspection.descricao || "");
       setAcaoCorretiva(editingInspection.acaoCorretiva || "");
@@ -164,8 +166,8 @@ export default function LancarInspecaoView({
       // Set defaults for new inspection
       setData(new Date().toISOString().split("T")[0]);
       
-      // If user is a Supervisor, try to pre-select them
-      let initialSupId = supervisors[0]?.id || "";
+      // If user is a Supervisor, try to pre-select them if matched by email
+      let initialSupId = "";
       if (currentUser) {
         const matchedSup = supervisors.find(
           (s) => s.email?.trim().toLowerCase() === currentUser.email.trim().toLowerCase()
@@ -323,14 +325,23 @@ export default function LancarInspecaoView({
       return setError(`O tamanho total das fotos (${(totalPhotosSize / 1024).toFixed(1)} KB) excede o limite máximo permitido de 650 KB por inspeção. Por favor, remova alguma foto.`);
     }
 
+    // Authorship fields: preserve on edit, populate on new
+    const uid = editingInspection?.criadoPorUid || currentUser?.id || auth.currentUser?.uid || "";
+    const nome = editingInspection?.criadoPorNome || currentUser?.nome || auth.currentUser?.displayName || "Usuário";
+    const email = editingInspection?.criadoPorEmail || currentUser?.email || auth.currentUser?.email || "";
+
     const finalInspection: Inspection = {
       id: editingInspection?.id || "insp_" + Math.random().toString(36).substring(2, 9),
       data,
       supervisorId,
       areaId,
       contratoId,
-      atividade: isPresenca ? "Presença em Campo" : atividade,
-      tipo: isPresenca ? "Presença em Campo" : tipo,
+      tipoLancamento: currentLaunchType,
+      tipo: currentLaunchType,
+      atividade: currentLaunchType,
+      criadoPorUid: uid,
+      criadoPorNome: nome,
+      criadoPorEmail: email,
       potencial: (isDSS || isPresenca) ? Potential.LEVE : potencial,
       descricao,
       acaoCorretiva: isPresenca ? "Presença em campo registrada" : (isDSS ? "Realizado DSS em campo" : acaoCorretiva),
@@ -340,6 +351,8 @@ export default function LancarInspecaoView({
       observacoes: observacoes || null,
       fotosAntes,
       fotosDepois: (isDSS || isPresenca) ? [] : fotosDepois,
+      rotacoesFotosAntes: editingInspection?.rotacoesFotosAntes,
+      rotacoesFotosDepois: editingInspection?.rotacoesFotosDepois,
       armazenamentoFotos: "firestore-inline",
       temaDSS: isDSS ? temaDSS : null,
       quantidadeParticipantes: (isDSS || isPresenca) ? Number(quantidadeParticipantes) : null,
@@ -431,7 +444,12 @@ export default function LancarInspecaoView({
                 required
                 value={supervisorId}
                 onChange={(e) => setSupervisorId(e.target.value)}
-                disabled={currentUser?.perfil === "Supervisor" && !!supervisorId}
+                disabled={
+                  currentUser?.perfil === "Supervisor" &&
+                  currentUser?.participaFarolGemba !== false &&
+                  !!supervisorId &&
+                  supervisors.some((s) => s.id === supervisorId && s.email?.trim().toLowerCase() === currentUser?.email?.trim().toLowerCase())
+                }
                 className="text-xs bg-gray-50 border border-gray-200 rounded-lg p-2.5 text-gray-700 focus:outline-none focus:ring-1 focus:ring-[#0B2E59] disabled:bg-gray-100 disabled:text-gray-400"
               >
                 <option value="">Selecione...</option>

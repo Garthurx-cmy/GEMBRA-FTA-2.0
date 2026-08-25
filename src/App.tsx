@@ -6,16 +6,7 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { auth, db } from "./services/firebase";
 import { onAuthStateChanged, signInWithEmailAndPassword, signOut, setPersistence, browserLocalPersistence, browserSessionPersistence, sendPasswordResetEmail, updatePassword } from "firebase/auth";
-import { doc, getDoc, updateDoc as fbUpdateDoc, setDoc as fbSetDoc, serverTimestamp } from "firebase/firestore";
-
-// Trace helper for writes in development
-const setDoc = async (ref: any, data: any, options?: any) => {
-  if (process.env.NODE_ENV !== "production") {
-    const path = ref && typeof ref.path === "string" ? ref.path : "unknown-path";
-    console.trace("[FIRESTORE WRITE]", path, "setDoc", data);
-  }
-  return fbSetDoc(ref, data, options);
-};
+import { doc, getDoc, updateDoc as fbUpdateDoc, serverTimestamp } from "firebase/firestore";
 
 const updateDoc = async (ref: any, data: any) => {
   if (process.env.NODE_ENV !== "production") {
@@ -24,7 +15,8 @@ const updateDoc = async (ref: any, data: any) => {
   }
   return fbUpdateDoc(ref, data);
 };
-import { dbService } from "./services/db";
+import { dbService, normalizeUserProfile, hasLegacyUppercaseFields } from "./services/db";
+import { buildUnifiedSupervisors, resolveSupervisorName } from "./utils/supervisors";
 import {
   Inspection,
   Supervisor,
@@ -97,11 +89,16 @@ export default function App() {
   const [viewingGlobalInspection, setViewingGlobalInspection] = useState<Inspection | null>(null);
   const [selectedMonth, setSelectedMonth] = useState<string>("auto");
 
+  // Unified operational supervisors (collection supervisors + operational users + currentUser)
+  const unifiedSupervisors = useMemo(() => {
+    return buildUnifiedSupervisors(supervisors, users, currentUser);
+  }, [supervisors, users, currentUser]);
+
   const globalSearchResults = useMemo(() => {
     const term = globalSearchTerm.trim().toLowerCase();
     if (!term) return [];
     return inspections.filter((insp) => {
-      const sup = supervisors.find((s) => s.id === insp.supervisorId)?.nome || dbService.getDeletedNames()[insp.supervisorId] || "";
+      const sup = resolveSupervisorName(insp.supervisorId, unifiedSupervisors, users, currentUser, dbService.getDeletedNames());
       const contract = contracts.find((c) => c.id === insp.contratoId) || (dbService.getDeletedNames()[insp.contratoId] ? { id: insp.contratoId, codigo: dbService.getDeletedNames()[insp.contratoId], nome: dbService.getDeletedNames()[insp.contratoId], ativo: false } : undefined);
       const contractCode = contract ? contract.codigo : "";
       const contractName = contract ? contract.nome : "";
@@ -118,7 +115,7 @@ export default function App() {
         typeName.toLowerCase().includes(term)
       );
     });
-  }, [globalSearchTerm, inspections, supervisors, contracts, areas]);
+  }, [globalSearchTerm, inspections, unifiedSupervisors, users, currentUser, contracts, areas]);
 
   // Fetch / Sync all local states with Database Service
   const refreshDatabaseStates = () => {
@@ -246,47 +243,33 @@ export default function App() {
           setAuthLoading(false);
           return;
         }
-        const profileSnap = await getDoc(doc(db, "users", firebaseUser.uid));
-        let profile: UserProfile;
-
-        if (!profileSnap.exists()) {
-          if (firebaseUser.email === "visitante@grupofta.com.br") {
-            const visitorData = {
-              id: firebaseUser.uid,
-              nome: "Visitante FTA",
-              email: "visitante@grupofta.com.br",
-              perfil: "visitante",
-              ativo: true
-            };
-            try {
-              await setDoc(doc(db, "users", firebaseUser.uid), visitorData);
-              profile = visitorData as UserProfile;
-            } catch (err) {
-              console.warn("Falha ao salvar perfil de visitante no Firestore (regras pendentes). Usando em memória.", err);
-              profile = visitorData as UserProfile;
-            }
-          } else {
-            await signOut(auth);
-            setLoginError("Seu acesso foi autenticado, mas o perfil ainda não está configurado.");
-            setAuthLoading(false);
-            return;
-          }
-        } else {
-          const rawProfile: any = { id: profileSnap.id, ...profileSnap.data() };
-          const p = (rawProfile.perfil || "").trim().toLowerCase();
-          const normalizedPerfil =
-            p === "desenvolvedor" || p === "desenvolvedor/admin" ? "Desenvolvedor/Admin" :
-            p === "admin" || p === "administrador" ? "Administrador" :
-            p === "gestor" ? "Gestor" :
-            p === "lider" || p === "líder" || p === "lider de equipe" || p === "líder de equipe" ? "Líder de Equipe" :
-            p === "supervisor" ? "Supervisor" :
-            rawProfile.perfil;
-          profile = { ...rawProfile, perfil: normalizedPerfil } as UserProfile;
+        let profileSnap: any = null;
+        try {
+          profileSnap = await getDoc(doc(db, "users", firebaseUser.uid));
+        } catch (readErr: any) {
+          console.error("Erro ao ler documento de perfil:", readErr);
+          await signOut(auth);
+          setLoginError("O Firestore negou a leitura do seu perfil. Verifique se o documento utiliza o mesmo UID da conta e se as regras foram publicadas.");
+          setAuthLoading(false);
+          return;
         }
+
+        if (!profileSnap || !profileSnap.exists()) {
+          await signOut(auth);
+          setLoginError("Conta autenticada, mas o perfil não foi encontrado. O administrador deve criar um documento na coleção users utilizando exatamente o UID da conta.");
+          setAuthLoading(false);
+          return;
+        }
+
+        const rawProfileData: any = profileSnap.data();
+        if (hasLegacyUppercaseFields(rawProfileData)) {
+          console.warn("Aviso: Perfil do usuário contém campos legados em maiúsculas. Carregado temporariamente em memória via normalizeUserProfile.", rawProfileData);
+        }
+        const profile: UserProfile = normalizeUserProfile(rawProfileData, profileSnap.id);
 
         if (!profile.ativo) {
           await signOut(auth);
-          setLoginError("Seu acesso está inativo. Entre em contato com o administrador.");
+          setLoginError("Seu perfil está inativo. Procure o administrador.");
           setAuthLoading(false);
           return;
         }
@@ -319,9 +302,13 @@ export default function App() {
           await updateDoc(doc(db, "users", firebaseUser.uid), { ultimoLogin: serverTimestamp() }).catch(() => undefined);
         }
         setTimeout(refreshDatabaseStates, 100);
-      } catch (error) {
-        console.error(error);
-        setLoginError("Não foi possível carregar seu perfil de acesso.");
+      } catch (error: any) {
+        console.error("Erro na autenticação/leitura do perfil:", error);
+        if (error?.code === "permission-denied" || error?.message?.toLowerCase().includes("permission") || error?.message?.toLowerCase().includes("insufficient")) {
+          setLoginError("O Firestore negou a leitura do seu perfil. Verifique se o documento utiliza o mesmo UID da conta e se as regras foram publicadas.");
+        } else {
+          setLoginError("Não foi possível carregar seu perfil de acesso.");
+        }
       } finally {
         setAuthLoading(false);
       }
@@ -445,8 +432,23 @@ export default function App() {
       await setPersistence(auth, rememberMe ? browserLocalPersistence : browserSessionPersistence);
       await signInWithEmailAndPassword(auth, loginEmail.trim().toLowerCase(), loginPassword);
     } catch (error: any) {
-      console.error(error);
-      setLoginError("E-mail ou senha incorretos.");
+      console.warn("Erro ao realizar login:", error?.code || error?.message);
+      if (
+        error?.code === "auth/invalid-credential" ||
+        error?.code === "auth/user-not-found" ||
+        error?.code === "auth/wrong-password" ||
+        error?.code === "auth/invalid-login-credentials"
+      ) {
+        setLoginError("E-mail ou senha incorretos. Verifique os dados digitados.");
+      } else if (error?.code === "auth/too-many-requests") {
+        setLoginError("Muitas tentativas sem sucesso. Aguarde alguns minutos ou redefina sua senha.");
+      } else if (error?.code === "auth/user-disabled") {
+        setLoginError("Esta conta de usuário foi desativada pelo administrador.");
+      } else if (error?.code === "auth/invalid-email") {
+        setLoginError("O formato do e-mail informado é inválido.");
+      } else {
+        setLoginError("Não foi possível entrar. Verifique seu e-mail e senha.");
+      }
     }
   };
 
@@ -647,7 +649,7 @@ export default function App() {
                 {globalSearchResults.map((insp) => {
                   const typeName = getTipoLancamento(insp.atividade, insp.tipo);
                   const conf = TIPO_LANCAMENTO_CONFIG[typeName];
-                  const sup = supervisors.find((s) => s.id === insp.supervisorId)?.nome || dbService.getDeletedNames()[insp.supervisorId] || "Outros";
+                  const sup = resolveSupervisorName(insp.supervisorId, unifiedSupervisors, users, currentUser, dbService.getDeletedNames());
 
                   return (
                     <button
@@ -794,7 +796,7 @@ export default function App() {
             {activeTab === "dashboard" && (
               <DashboardView
                 inspections={inspections}
-                supervisors={supervisors}
+                supervisors={unifiedSupervisors}
                 areas={areas}
                 contracts={contracts}
                 selectedMonth={selectedMonth}
@@ -806,7 +808,7 @@ export default function App() {
 
             {activeTab === "lancar" && currentUser?.perfil !== "visitante" && (
               <LancarInspecaoView
-                supervisors={supervisors}
+                supervisors={unifiedSupervisors}
                 areas={areas}
                 contracts={contracts}
                 config={config}
@@ -820,7 +822,7 @@ export default function App() {
             {activeTab === "historico" && (
               <HistoricoView
                 inspections={inspections}
-                supervisors={supervisors}
+                supervisors={unifiedSupervisors}
                 areas={areas}
                 contracts={contracts}
                 selectedMonth={selectedMonth}
@@ -836,7 +838,7 @@ export default function App() {
             {activeTab === "relatorios" && (
               <RelatoriosView
                 inspections={inspections}
-                supervisors={supervisors}
+                supervisors={unifiedSupervisors}
                 areas={areas}
                 contracts={contracts}
                 config={config}
@@ -847,7 +849,9 @@ export default function App() {
             {activeTab === "ranking" && (
               <RankingView
                 inspections={inspections}
-                supervisors={supervisors}
+                supervisors={unifiedSupervisors}
+                users={users}
+                currentUser={currentUser}
                 selectedMonth={selectedMonth}
                 onSelectMonth={setSelectedMonth}
               />
@@ -856,7 +860,7 @@ export default function App() {
             {activeTab === "exportacoes" && currentUser?.perfil !== "visitante" && (
               <ExportacoesView
                 inspections={inspections}
-                supervisors={supervisors}
+                supervisors={unifiedSupervisors}
                 areas={areas}
                 onSelectInspectionReport={handleSelectInspectionReport}
               />
@@ -869,6 +873,7 @@ export default function App() {
                 contracts={contracts}
                 config={config}
                 users={users}
+                currentUser={currentUser}
                 onRefreshDB={refreshDatabaseStates}
               />
             )}
@@ -941,7 +946,7 @@ export default function App() {
                 <div>
                   <span className="block text-[10px] text-gray-400 font-bold uppercase">Supervisor</span>
                   <span className="font-bold text-gray-800">
-                    {supervisors.find(s => s.id === viewingGlobalInspection.supervisorId)?.nome || dbService.getDeletedNames()[viewingGlobalInspection.supervisorId] || "Outros"}
+                    {resolveSupervisorName(viewingGlobalInspection.supervisorId, unifiedSupervisors, users, currentUser, dbService.getDeletedNames())}
                   </span>
                 </div>
                 <div>

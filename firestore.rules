@@ -1,26 +1,102 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    function signedIn() { return request.auth != null; }
-    function profile() { return get(/databases/$(database)/documents/users/$(request.auth.uid)).data; }
-    function active() { return signedIn() && profile().ativo == true; }
-    function admin() {
-      return active() && profile().perfil in ['Desenvolvedor/Admin', 'Administrador', 'desenvolvedor', 'admin'];
+    function signedIn() {
+      return request.auth != null;
     }
-    function manager() { return active() && profile().perfil in ['Gestor', 'gestor']; }
-    function supervisor() { return active() && profile().perfil in ['Supervisor', 'supervisor']; }
-    function teamLeader() { return active() && profile().perfil in ['Líder de Equipe', 'Lider de Equipe', 'lider_equipe', 'lider']; }
-    function operational() { return admin() || manager() || supervisor() || teamLeader(); }
-    function visitor() { return active() && profile().perfil in ['Visitante', 'visitante']; }
+
+    function profile() {
+      return get(
+        /databases/$(database)/documents/users/$(request.auth.uid)
+      ).data;
+    }
+
+    function active() {
+      return signedIn() && (
+        profile().get('ativo', false) == true ||
+        profile().get('ATIVO', false) == true
+      );
+    }
+
+    function admin() {
+      return active() && (
+        profile().get('perfil', '') in [
+          'Desenvolvedor/Admin',
+          'Administrador',
+          'desenvolvedor',
+          'admin'
+        ] ||
+        profile().get('PERFIL', '') in [
+          'DESENVOLVEDOR/ADMIN',
+          'ADMINISTRADOR',
+          'ADMIN'
+        ]
+      );
+    }
+
+    function manager() {
+      return active() && (
+        profile().get('perfil', '') in ['Gestor', 'gestor'] ||
+        profile().get('PERFIL', '') in ['GESTOR']
+      );
+    }
+
+    function supervisor() {
+      return active() && (
+        profile().get('perfil', '') in ['Supervisor', 'supervisor'] ||
+        profile().get('PERFIL', '') in ['SUPERVISOR']
+      );
+    }
+
+    function teamLeader() {
+      return active() && (
+        profile().get('perfil', '') in [
+          'Líder de Equipe',
+          'Lider de Equipe',
+          'lider_equipe',
+          'lider'
+        ] ||
+        profile().get('PERFIL', '') in [
+          'LÍDER DE EQUIPE',
+          'LIDER DE EQUIPE',
+          'LIDER'
+        ]
+      );
+    }
+
+    function visitor() {
+      return active() && (
+        profile().get('perfil', '') in ['Visitante', 'visitante'] ||
+        profile().get('PERFIL', '') in ['VISITANTE']
+      );
+    }
+
+    function operational() {
+      return admin() || manager() || supervisor() || teamLeader();
+    }
 
     match /users/{uid} {
-      allow read: if signedIn() && (request.auth.uid == uid || admin());
-      allow create: if admin() || (signedIn() && request.auth.uid == uid);
-      allow update: if admin() || (
-        signedIn() && request.auth.uid == uid &&
-        request.resource.data.diff(resource.data).affectedKeys()
-          .hasOnly(['primeiroAcesso', 'deveAlterarSenha', 'ultimoLogin', 'updatedAt'])
+      allow get: if signedIn() && (
+        request.auth.uid == uid ||
+        admin()
       );
+
+      allow list: if admin();
+
+      allow create: if admin();
+
+      allow update: if admin() || (
+        signedIn() &&
+        request.auth.uid == uid &&
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly([
+            'primeiroAcesso',
+            'deveAlterarSenha',
+            'ultimoLogin',
+            'updatedAt'
+          ])
+      );
+
       allow delete: if admin() && request.auth.uid != uid;
     }
 
@@ -85,6 +161,8 @@ service cloud.firestore {
       allow update, delete: if false;
     }
 
-    match /{document=**} { allow read, write: if false; }
+    match /{document=**} {
+      allow read, write: if false;
+    }
   }
 }

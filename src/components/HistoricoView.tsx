@@ -331,7 +331,7 @@ export default function HistoricoView({
   ]);
 
   // Helper resolvers
-  const getSupervisorName = (id: string) => supervisors.find((s) => s.id === id)?.nome || dbService.getDeletedNames()[id] || "Outros";
+  const getSupervisorName = (id: string) => supervisors.find((s) => s.id === id)?.nome || (currentUser?.id === id ? currentUser.nome : "") || dbService.getDeletedNames()[id] || "Outros";
   const getAreaName = (id: string) => areas.find((a) => a.id === id)?.nome || dbService.getDeletedNames()[id] || "Outros";
   const getContractCode = (id: string) => contracts.find((c) => c.id === id)?.codigo || dbService.getDeletedNames()[id] || "Contrato Geral";
 

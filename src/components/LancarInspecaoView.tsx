@@ -5,6 +5,7 @@
 
 import React, { useState, useEffect } from "react";
 import { auth } from "../services/firebase";
+import { isOperationalRole } from "../utils/supervisors";
 import {
   Potential,
   InspectionStatus,
@@ -166,14 +167,17 @@ export default function LancarInspecaoView({
       // Set defaults for new inspection
       setData(new Date().toISOString().split("T")[0]);
       
-      // If user is a Supervisor, try to pre-select them if matched by email
+      // If user is a Supervisor or Team Leader, auto-select their own profile and use currentUser.id
       let initialSupId = "";
       if (currentUser) {
+        const isOp = isOperationalRole(currentUser.perfil);
         const matchedSup = supervisors.find(
-          (s) => s.email?.trim().toLowerCase() === currentUser.email.trim().toLowerCase()
+          (s) => s.id === currentUser.id || (s.email && currentUser.email && s.email.trim().toLowerCase() === currentUser.email.trim().toLowerCase())
         );
         if (matchedSup) {
           initialSupId = matchedSup.id;
+        } else if (isOp) {
+          initialSupId = currentUser.id;
         }
       }
       setSupervisorId(initialSupId);
@@ -445,10 +449,15 @@ export default function LancarInspecaoView({
                 value={supervisorId}
                 onChange={(e) => setSupervisorId(e.target.value)}
                 disabled={
-                  currentUser?.perfil === "Supervisor" &&
-                  currentUser?.participaFarolGemba !== false &&
-                  !!supervisorId &&
-                  supervisors.some((s) => s.id === supervisorId && s.email?.trim().toLowerCase() === currentUser?.email?.trim().toLowerCase())
+                  currentUser &&
+                  isOperationalRole(currentUser.perfil) &&
+                  currentUser.perfil !== "Administrador" &&
+                  currentUser.perfil !== "Desenvolvedor/Admin" &&
+                  currentUser.perfil !== "Gestor" &&
+                  currentUser.perfil !== "ADMINISTRADOR" &&
+                  currentUser.perfil !== "DESENVOLVEDOR/ADMIN" &&
+                  currentUser.perfil !== "GESTOR" &&
+                  !!supervisorId
                 }
                 className="text-xs bg-gray-50 border border-gray-200 rounded-lg p-2.5 text-gray-700 focus:outline-none focus:ring-1 focus:ring-[#0B2E59] disabled:bg-gray-100 disabled:text-gray-400"
               >

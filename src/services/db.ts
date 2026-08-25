@@ -16,7 +16,8 @@ import {
   onSnapshot as fbOnSnapshot,
   serverTimestamp, getDocs as fbGetDocs, query, where,
   writeBatch as fbWriteBatch,
-  orderBy, limit, startAfter, getDoc as fbGetDoc
+  orderBy, limit, startAfter, getDoc as fbGetDoc,
+  deleteField
 } from "firebase/firestore";
 
 // Instrumenting Read operations
@@ -144,6 +145,141 @@ const normalize = (value = "") => value
 const normalizeCode = (value = "") => normalize(value).replace(/[^a-z0-9]/g, "");
 const idFrom = (prefix: string, value: string) => `${prefix}_${normalizeCode(value) || crypto.randomUUID()}`;
 
+export const NOVOS_13_USUARIOS_PADRAO = [
+  { email: "fabiosantox91@gmail.com", cargo: "LÍDER DE EQUIPE" },
+  { email: "vandersonbarbosa923@gmail.com", cargo: "LÍDER DE EQUIPE - MEC" },
+  { email: "l.sousa@grupofta.com.br", cargo: "LÍDER DE EQUIPE" },
+  { email: "jeffersoncarvalhoalves52@gmail.com", cargo: "LÍDER DE EQUIPE" },
+  { email: "silvadecarvalhodaniel30@gmail.com", cargo: "LÍDER DE EQUIPE" },
+  { email: "wesley-neves@hotmail.com", cargo: "LÍDER DE EQUIPE" },
+  { email: "filipeviana425@gmail.com", cargo: "LÍDER DE EQUIPE" },
+  { email: "washingtonpinha@gmail.com", cargo: "LÍDER DE EQUIPE" },
+  { email: "fitalo306@gmail.com", cargo: "LÍDER DE EQUIPE" },
+  { email: "bentodasilvaferreira07@gmail.com", cargo: "LÍDER DE EQUIPE" },
+  { email: "r.slemos@grupofta.com.br", cargo: "LÍDER DE EQUIPE" },
+  { email: "r.freitas@grupofta.com.br", cargo: "ENGENHEIRO DE SEGURANÇA" },
+  { email: "k.trindade@grupofta.com.br", cargo: "ANALISTA DE SEGURANÇA" }
+];
+
+export function normalizarPerfil(rawRole?: any): string {
+  const p = String(rawRole ?? "").trim().toLowerCase();
+  if (p === "desenvolvedor" || p === "desenvolvedor/admin" || p === "dev" || p === "desenvolvedor / admin") {
+    return "Desenvolvedor/Admin";
+  }
+  if (p === "admin" || p === "administrador") {
+    return "Administrador";
+  }
+  if (p === "gestor") {
+    return "Gestor";
+  }
+  if (
+    p === "supervisor" ||
+    p === "lider" ||
+    p === "líder" ||
+    p === "lider de equipe" ||
+    p === "líder de equipe" ||
+    p === "lider de equipe - mec" ||
+    p === "líder de equipe - mecânica" ||
+    p === "engenheiro de segurança" ||
+    p === "analista de segurança"
+  ) {
+    return "supervisor";
+  }
+  if (p === "visitante") {
+    return "visitante";
+  }
+  return rawRole ? String(rawRole).trim() : "supervisor";
+}
+
+export function hasLegacyUppercaseFields(data: any): boolean {
+  if (!data || typeof data !== "object") return false;
+  return (
+    data.ATIVO !== undefined ||
+    data.CARGO !== undefined ||
+    data.DEVEALTERARSENHA !== undefined ||
+    data.EMAIL !== undefined ||
+    data.NOME !== undefined ||
+    data.PERFIL !== undefined ||
+    data.PRIMEIROACESSO !== undefined ||
+    data.ULTIMOLOGIN !== undefined
+  );
+}
+
+export function normalizeUserProfile(data: any, docId?: string): UserProfile {
+  if (!data) {
+    return {
+      id: docId || "",
+      nome: "",
+      email: "",
+      perfil: "visitante",
+      cargo: "",
+      ativo: false,
+      participaFarolGemba: true,
+      primeiroAcesso: false,
+      deveAlterarSenha: false,
+      ultimoLogin: null
+    };
+  }
+
+  // 1. ativo: data.ativo ?? data.ATIVO ?? (data.status === "ativo")
+  let ativo = true;
+  if (data.ativo !== undefined) {
+    ativo = typeof data.ativo === "string" ? data.ativo.toLowerCase() === "true" || data.ativo.toLowerCase() === "ativo" : Boolean(data.ativo);
+  } else if (data.ATIVO !== undefined) {
+    ativo = typeof data.ATIVO === "string" ? data.ATIVO.toLowerCase() === "true" || data.ATIVO.toLowerCase() === "ativo" : Boolean(data.ATIVO);
+  } else if (data.status !== undefined) {
+    ativo = String(data.status).toLowerCase() === "ativo";
+  }
+
+  // 2. cargo: data.cargo ?? data.CARGO ?? data.funcao ?? data.function ?? ""
+  const cargo = String(data.cargo ?? data.CARGO ?? data.funcao ?? data.function ?? data.CARGO_FUNCAO ?? "").trim();
+
+  // 3. deveAlterarSenha: data.deveAlterarSenha ?? data.DEVEALTERARSENHA ?? false
+  let deveAlterarSenha = false;
+  if (data.deveAlterarSenha !== undefined) {
+    deveAlterarSenha = typeof data.deveAlterarSenha === "string" ? data.deveAlterarSenha.toLowerCase() === "true" : Boolean(data.deveAlterarSenha);
+  } else if (data.DEVEALTERARSENHA !== undefined) {
+    deveAlterarSenha = typeof data.DEVEALTERARSENHA === "string" ? data.DEVEALTERARSENHA.toLowerCase() === "true" : Boolean(data.DEVEALTERARSENHA);
+  }
+
+  // 4. email: String(data.email ?? data.EMAIL ?? "").trim().toLowerCase()
+  const email = String(data.email ?? data.EMAIL ?? "").trim().toLowerCase();
+
+  // 5. nome: data.nome ?? data.NOME ?? data.name ?? ""
+  const nome = String(data.nome ?? data.NOME ?? data.name ?? "").trim();
+
+  // 6. perfil: normalizarPerfil(data.perfil ?? data.PERFIL ?? data.role ?? "visitante")
+  const rawPerfil = data.perfil ?? data.PERFIL ?? data.role ?? (email === "visitante@grupofta.com.br" ? "visitante" : "supervisor");
+  const perfil = normalizarPerfil(rawPerfil);
+
+  // 7. primeiroAcesso: data.primeiroAcesso ?? data.PRIMEIROACESSO ?? false
+  let primeiroAcesso = false;
+  if (data.primeiroAcesso !== undefined) {
+    primeiroAcesso = typeof data.primeiroAcesso === "string" ? data.primeiroAcesso.toLowerCase() === "true" : Boolean(data.primeiroAcesso);
+  } else if (data.PRIMEIROACESSO !== undefined) {
+    primeiroAcesso = typeof data.PRIMEIROACESSO === "string" ? data.PRIMEIROACESSO.toLowerCase() === "true" : Boolean(data.PRIMEIROACESSO);
+  }
+
+  // 8. participaFarolGemba: data.participaFarolGemba ?? true (com suporte a false explícito)
+  let participaFarolGemba = true;
+  if (data.participaFarolGemba !== undefined) {
+    participaFarolGemba = typeof data.participaFarolGemba === "string" ? data.participaFarolGemba.toLowerCase() === "true" : Boolean(data.participaFarolGemba);
+  }
+
+  return {
+    id: docId || data.id || "",
+    nome,
+    email,
+    perfil,
+    cargo,
+    ativo,
+    participaFarolGemba,
+    primeiroAcesso,
+    deveAlterarSenha,
+    ultimoLogin: data.ultimoLogin ?? data.ULTIMOLOGIN ?? data.lastLogin ?? null
+  };
+}
+
 class DBService {
   private inspections: Inspection[] = [];
   private supervisors: Supervisor[] = [];
@@ -238,7 +374,7 @@ class DBService {
 
       if (isAdmin) {
         this.unsubscribers.push(onSnapshot(collection(db, "users"), snap => {
-          this.users = snap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as UserProfile));
+          this.users = snap.docs.map(d => normalizeUserProfile(this.convert(d.data()), d.id));
           this.emit("users");
         }, err => console.error("Falha ao sincronizar usuários:", err)));
 
@@ -500,7 +636,7 @@ class DBService {
     };
     await setDoc(doc(db, "inspections", inspection.id), payload, { merge: true });
     await this.addAuditLog(isNew ? "create" : "update", "inspection", inspection.id, { supervisorId: inspection.supervisorId, status: inspection.status });
-    const supName = this.supervisors.find(s => s.id === inspection.supervisorId)?.nome || "Usuário";
+    const supName = this.supervisors.find(s => s.id === inspection.supervisorId)?.nome || this.users.find(u => u.id === inspection.supervisorId)?.nome || (auth?.currentUser?.uid === inspection.supervisorId ? (auth.currentUser.displayName || auth.currentUser.email) : "") || "Usuário";
     await this.addNotification(supName, isNew ? "lançou uma inspeção" : "atualizou uma inspeção", inspection.atividade || inspection.tipo);
   }
 
@@ -555,6 +691,34 @@ class DBService {
     if (duplicate) throw new Error("Este e-mail já está cadastrado.");
     await setDoc(doc(db, "users", user.id), { ...user, email: emailKey, updatedAt: serverTimestamp() }, { merge: true });
   }
+
+  async updateUser(id: string, data: {
+    nome: string;
+    email: string;
+    cargo: string;
+    perfil: string;
+    ativo: boolean;
+    participaFarolGemba: boolean;
+  }): Promise<void> {
+    this.assertFirebase();
+    const emailKey = normalize(data.email);
+    const duplicate = this.users.find(u => u.id !== id && normalize(u.email) === emailKey);
+    if (duplicate) throw new Error("Este e-mail já está cadastrado.");
+
+    // Strict canonical payload - no uppercase fields, only documented canonical fields
+    const payload = {
+      nome: data.nome.trim(),
+      email: emailKey,
+      cargo: data.cargo.trim(),
+      perfil: data.perfil,
+      ativo: Boolean(data.ativo),
+      participaFarolGemba: Boolean(data.participaFarolGemba),
+      updatedAt: serverTimestamp()
+    };
+
+    await setDoc(doc(db, "users", id), payload, { merge: true });
+  }
+
   async deleteUser(id: string) { this.assertFirebase(); await deleteDoc(doc(db, "users", id)); }
 
   async saveDeletedName(id: string, name: string) { this.assertFirebase(); await setDoc(doc(db, "deleted_names", id), { name }, { merge: true }); }
@@ -643,6 +807,283 @@ class DBService {
       result[rule.col] = removed;
     }
     return result;
+  }
+
+  async getUserById(id: string): Promise<UserProfile | null> {
+    this.assertFirebase();
+    const cached = this.users.find(u => u.id === id);
+    if (cached) return cached;
+    const docSnap = await getDoc(doc(db, "users", id));
+    if (docSnap.exists()) {
+      return normalizeUserProfile(this.convert(docSnap.data()), docSnap.id);
+    }
+    return null;
+  }
+
+  async previewStandardizeUserProfiles(): Promise<{
+    totalAnalyzed: number;
+    toUpdate: Array<{
+      id: string;
+      email: string;
+      nome: string;
+      changes: string[];
+      legacyFields: string[];
+      canonicalValues: Record<string, any>;
+    }>;
+    alreadyStandard: number;
+    missingNameOrEmail: Array<{ id: string; email: string; nome: string }>;
+  }> {
+    this.assertFirebase();
+    const snap = await getDocs(collection(db, "users"));
+    const toUpdate: Array<{
+      id: string;
+      email: string;
+      nome: string;
+      changes: string[];
+      legacyFields: string[];
+      canonicalValues: Record<string, any>;
+    }> = [];
+    let alreadyStandard = 0;
+    const missingNameOrEmail: Array<{ id: string; email: string; nome: string }> = [];
+
+    snap.docs.forEach(userDoc => {
+      const rawData = userDoc.data();
+      const normalized = normalizeUserProfile(rawData, userDoc.id);
+      const changes: string[] = [];
+      const legacyFields: string[] = [];
+
+      // Detect legacy uppercase fields
+      if (rawData.ATIVO !== undefined) legacyFields.push("ATIVO");
+      if (rawData.CARGO !== undefined) legacyFields.push("CARGO");
+      if (rawData.DEVEALTERARSENHA !== undefined) legacyFields.push("DEVEALTERARSENHA");
+      if (rawData.EMAIL !== undefined) legacyFields.push("EMAIL");
+      if (rawData.NOME !== undefined) legacyFields.push("NOME");
+      if (rawData.PERFIL !== undefined) legacyFields.push("PERFIL");
+      if (rawData.PRIMEIROACESSO !== undefined) legacyFields.push("PRIMEIROACESSO");
+      if (rawData.ULTIMOLOGIN !== undefined) legacyFields.push("ULTIMOLOGIN");
+
+      if (legacyFields.length > 0) {
+        changes.push(`Remover ${legacyFields.length} campo(s) em maiúsculas: ${legacyFields.join(", ")}`);
+      }
+
+      // Check missing canonical fields
+      if (rawData.ativo === undefined && normalized.ativo !== undefined) changes.push(`ativo: ${normalized.ativo}`);
+      if (rawData.email === undefined && normalized.email) changes.push(`email: ${normalized.email}`);
+      if (rawData.nome === undefined && normalized.nome) changes.push(`nome: ${normalized.nome}`);
+      if (rawData.perfil === undefined && normalized.perfil) changes.push(`perfil: ${normalized.perfil}`);
+      if (rawData.cargo === undefined && normalized.cargo) changes.push(`cargo: ${normalized.cargo}`);
+      if (rawData.primeiroAcesso === undefined && normalized.primeiroAcesso !== undefined) changes.push(`primeiroAcesso: ${normalized.primeiroAcesso}`);
+      if (rawData.deveAlterarSenha === undefined && normalized.deveAlterarSenha !== undefined) changes.push(`deveAlterarSenha: ${normalized.deveAlterarSenha}`);
+      if (rawData.participaFarolGemba === undefined) changes.push(`participaFarolGemba: ${normalized.participaFarolGemba}`);
+
+      // Check special 13 users
+      const special13 = NOVOS_13_USUARIOS_PADRAO.find(u => u.email.toLowerCase() === normalized.email.toLowerCase());
+      if (special13) {
+        if (normalized.participaFarolGemba !== false) {
+          changes.push("Definir participaFarolGemba: false (Regra Liderança/Segurança)");
+          normalized.participaFarolGemba = false;
+        }
+        if (special13.cargo && !normalized.cargo) {
+          changes.push(`Definir cargo padrão: "${special13.cargo}"`);
+          normalized.cargo = special13.cargo;
+        }
+      }
+
+      if (!normalized.email || !normalized.nome) {
+        missingNameOrEmail.push({ id: userDoc.id, email: normalized.email, nome: normalized.nome });
+      }
+
+      if (changes.length > 0) {
+        toUpdate.push({
+          id: userDoc.id,
+          email: normalized.email || "(sem e-mail)",
+          nome: normalized.nome || "(sem nome)",
+          changes,
+          legacyFields,
+          canonicalValues: {
+            ativo: normalized.ativo,
+            cargo: normalized.cargo || "",
+            deveAlterarSenha: normalized.deveAlterarSenha,
+            email: normalized.email,
+            nome: normalized.nome,
+            perfil: normalized.perfil,
+            primeiroAcesso: normalized.primeiroAcesso,
+            participaFarolGemba: normalized.participaFarolGemba
+          }
+        });
+      } else {
+        alreadyStandard++;
+      }
+    });
+
+    return {
+      totalAnalyzed: snap.docs.length,
+      toUpdate,
+      alreadyStandard,
+      missingNameOrEmail
+    };
+  }
+
+  async standardizeUserProfiles(): Promise<{
+    totalAnalyzed: number;
+    updatedCount: number;
+    details: Array<{ id: string; email: string; nome: string; changes: string[] }>;
+    errors: string[];
+  }> {
+    this.assertFirebase();
+    const snap = await getDocs(collection(db, "users"));
+    const details: Array<{ id: string; email: string; nome: string; changes: string[] }> = [];
+    const errors: string[] = [];
+    let updatedCount = 0;
+
+    for (const userDoc of snap.docs) {
+      const rawData = userDoc.data();
+      const normalized = normalizeUserProfile(rawData, userDoc.id);
+      const changes: string[] = [];
+      const legacyFields: string[] = [];
+
+      if (rawData.ATIVO !== undefined) legacyFields.push("ATIVO");
+      if (rawData.CARGO !== undefined) legacyFields.push("CARGO");
+      if (rawData.DEVEALTERARSENHA !== undefined) legacyFields.push("DEVEALTERARSENHA");
+      if (rawData.EMAIL !== undefined) legacyFields.push("EMAIL");
+      if (rawData.NOME !== undefined) legacyFields.push("NOME");
+      if (rawData.PERFIL !== undefined) legacyFields.push("PERFIL");
+      if (rawData.PRIMEIROACESSO !== undefined) legacyFields.push("PRIMEIROACESSO");
+      if (rawData.ULTIMOLOGIN !== undefined) legacyFields.push("ULTIMOLOGIN");
+
+      if (legacyFields.length > 0) {
+        changes.push(`Campos legados removidos: ${legacyFields.join(", ")}`);
+      }
+
+      if (rawData.ativo === undefined) changes.push(`ativo: ${normalized.ativo}`);
+      if (rawData.email === undefined) changes.push(`email: ${normalized.email}`);
+      if (rawData.nome === undefined) changes.push(`nome: ${normalized.nome}`);
+      if (rawData.perfil === undefined) changes.push(`perfil: ${normalized.perfil}`);
+      if (rawData.cargo === undefined && normalized.cargo) changes.push(`cargo: ${normalized.cargo}`);
+      if (rawData.primeiroAcesso === undefined) changes.push(`primeiroAcesso: ${normalized.primeiroAcesso}`);
+      if (rawData.deveAlterarSenha === undefined) changes.push(`deveAlterarSenha: ${normalized.deveAlterarSenha}`);
+      if (rawData.participaFarolGemba === undefined) changes.push(`participaFarolGemba: ${normalized.participaFarolGemba}`);
+
+      // Special 13 users check
+      const special13 = NOVOS_13_USUARIOS_PADRAO.find(u => u.email.toLowerCase() === normalized.email.toLowerCase());
+      if (special13) {
+        if (normalized.participaFarolGemba !== false) {
+          normalized.participaFarolGemba = false;
+          changes.push("participaFarolGemba: false");
+        }
+        if (special13.cargo && !normalized.cargo) {
+          normalized.cargo = special13.cargo;
+          changes.push(`cargo: ${special13.cargo}`);
+        }
+      }
+
+      if (changes.length > 0) {
+        try {
+          const updatePayload: Record<string, any> = {
+            ativo: normalized.ativo,
+            cargo: normalized.cargo || "",
+            deveAlterarSenha: normalized.deveAlterarSenha,
+            email: normalized.email,
+            nome: normalized.nome,
+            perfil: normalized.perfil,
+            primeiroAcesso: normalized.primeiroAcesso,
+            participaFarolGemba: normalized.participaFarolGemba,
+            updatedAt: serverTimestamp()
+          };
+
+          // Exclusively delete legacy uppercase fields without touching any other fields
+          if (rawData.ATIVO !== undefined) updatePayload.ATIVO = deleteField();
+          if (rawData.CARGO !== undefined) updatePayload.CARGO = deleteField();
+          if (rawData.DEVEALTERARSENHA !== undefined) updatePayload.DEVEALTERARSENHA = deleteField();
+          if (rawData.EMAIL !== undefined) updatePayload.EMAIL = deleteField();
+          if (rawData.NOME !== undefined) updatePayload.NOME = deleteField();
+          if (rawData.PERFIL !== undefined) updatePayload.PERFIL = deleteField();
+          if (rawData.PRIMEIROACESSO !== undefined) updatePayload.PRIMEIROACESSO = deleteField();
+          if (rawData.ULTIMOLOGIN !== undefined) updatePayload.ULTIMOLOGIN = deleteField();
+
+          await updateDoc(doc(db, "users", userDoc.id), updatePayload);
+          updatedCount++;
+          details.push({
+            id: userDoc.id,
+            email: normalized.email || "(sem e-mail)",
+            nome: normalized.nome || "(sem nome)",
+            changes
+          });
+        } catch (err: any) {
+          console.error(`Erro ao padronizar usuário ${userDoc.id}:`, err);
+          errors.push(`Erro ao padronizar usuário ${userDoc.id} (${normalized.email}): ${err?.message || err}`);
+        }
+      }
+    }
+
+    try {
+      await this.addAuditLog("standardize_user_profiles", "users", "all", {
+        totalAnalyzed: snap.docs.length,
+        updatedCount,
+        errorCount: errors.length
+      });
+    } catch (auditErr) {
+      console.warn("Não foi possível registrar o log de auditoria da padronização:", auditErr);
+    }
+
+    return {
+      totalAnalyzed: snap.docs.length,
+      updatedCount,
+      details,
+      errors
+    };
+  }
+
+  async initializeStandard13Users(): Promise<{
+    created: number;
+    updated: number;
+    errors: string[];
+  }> {
+    this.assertFirebase();
+    const snap = await getDocs(collection(db, "users"));
+    const existingUsers = snap.docs.map(d => normalizeUserProfile(d.data(), d.id));
+    let created = 0;
+    let updated = 0;
+    const errors: string[] = [];
+
+    for (const item of NOVOS_13_USUARIOS_PADRAO) {
+      const emailLower = item.email.trim().toLowerCase();
+      const existing = existingUsers.find(u => u.email.toLowerCase() === emailLower);
+
+      if (existing) {
+        try {
+          await updateDoc(doc(db, "users", existing.id), {
+            perfil: "supervisor",
+            cargo: existing.cargo || item.cargo,
+            ativo: true,
+            primeiroAcesso: existing.primeiroAcesso ?? true,
+            deveAlterarSenha: existing.deveAlterarSenha ?? true,
+            participaFarolGemba: false,
+            updatedAt: serverTimestamp()
+          });
+          updated++;
+        } catch (err: any) {
+          errors.push(`Erro ao atualizar ${item.email}: ${err?.message || err}`);
+        }
+      } else {
+        // Also ensure pre-authorization exists
+        try {
+          const authEmailId = idFrom("email", emailLower);
+          await setDoc(doc(db, "authorized_emails", authEmailId), {
+            id: authEmailId,
+            email: emailLower,
+            perfilPadrao: "Supervisor",
+            ativo: true,
+            updatedAt: serverTimestamp()
+          }, { merge: true });
+          created++;
+        } catch (err: any) {
+          errors.push(`Erro ao pré-autorizar ${item.email}: ${err?.message || err}`);
+        }
+      }
+    }
+
+    return { created, updated, errors };
   }
 
   private isJhonata(sup?: any): boolean {

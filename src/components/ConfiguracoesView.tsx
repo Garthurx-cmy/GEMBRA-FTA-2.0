@@ -31,7 +31,14 @@ import {
   Sliders,
   Award,
   Pencil,
-  PlusCircle
+  PlusCircle,
+  RefreshCw,
+  AlertTriangle,
+  Check,
+  CheckSquare,
+  Info,
+  Sparkles,
+  ShieldAlert
 } from "lucide-react";
 import { dbService } from "../services/db";
 import { deveParticiparFarolGemba, NAO_PARTICIPANTES_FAROL_GEMBA } from "../utils/operational";
@@ -42,6 +49,7 @@ interface ConfiguracoesViewProps {
   contracts: Contract[];
   config: SystemConfig;
   users: UserProfile[];
+  currentUser?: UserProfile | null;
   onRefreshDB: () => void;
 }
 
@@ -51,6 +59,7 @@ export default function ConfiguracoesView({
   contracts,
   config,
   users,
+  currentUser,
   onRefreshDB
 }: ConfiguracoesViewProps) {
   // --- SUB TABS STATE ---
@@ -61,6 +70,29 @@ export default function ConfiguracoesView({
     id: string;
     type: "supervisor" | "area" | "contract" | "tipoInspecao" | "processo" | "user" | "authorizedEmail";
     displayLabel: string;
+  } | null>(null);
+
+  // --- STANDARDIZATION MODAL STATES ---
+  const [standardizeLoading, setStandardizeLoading] = useState(false);
+  const [standardizePreview, setStandardizePreview] = useState<{
+    totalAnalyzed: number;
+    toUpdate: Array<{
+      id: string;
+      email: string;
+      nome: string;
+      changes: string[];
+      legacyFields: string[];
+      canonicalValues: Record<string, any>;
+    }>;
+    alreadyStandard: number;
+    missingNameOrEmail: Array<{ id: string; email: string; nome: string }>;
+  } | null>(null);
+  const [showStandardizeModal, setShowStandardizeModal] = useState(false);
+  const [standardizeResult, setStandardizeResult] = useState<{
+    totalAnalyzed: number;
+    updatedCount: number;
+    details: Array<{ id: string; email: string; nome: string; changes: string[] }>;
+    errors: string[];
   } | null>(null);
 
   // --- CADASTROS STATES ---
@@ -145,9 +177,11 @@ export default function ConfiguracoesView({
   const [userModalEmail, setUserModalEmail] = useState("");
   const [userModalCargo, setUserModalCargo] = useState("");
   const [userModalPassword, setUserModalPassword] = useState("");
-  const [userModalPerfil, setUserModalPerfil] = useState<"Desenvolvedor/Admin" | "Supervisor" | "Gestor" | "Líder de Equipe">("Supervisor");
+  const [userModalPerfil, setUserModalPerfil] = useState<"Desenvolvedor/Admin" | "Supervisor" | "Gestor" | "Líder de Equipe" | "Visitante">("Supervisor");
   const [userModalStatus, setUserModalStatus] = useState<"Ativo" | "Inativo">("Ativo");
   const [userModalParticipaFarolGemba, setUserModalParticipaFarolGemba] = useState<boolean>(true);
+  const [isSavingUser, setIsSavingUser] = useState(false);
+  const [userModalError, setUserModalError] = useState("");
 
   // --- SEED ENABLERS ---
   const showSuccess = (msg: string) => {
@@ -448,6 +482,16 @@ export default function ConfiguracoesView({
     });
   };
 
+  const handleCloseUserModal = () => {
+    setUserModalOpen(false);
+    setEditingUser(null);
+    setUserModalNome("");
+    setUserModalEmail("");
+    setUserModalCargo("");
+    setUserModalPassword("");
+    setUserModalError("");
+  };
+
   const handleOpenAddUserModal = () => {
     setEditingUser(null);
     setUserModalNome("");
@@ -457,30 +501,68 @@ export default function ConfiguracoesView({
     setUserModalPerfil("Supervisor");
     setUserModalStatus("Ativo");
     setUserModalParticipaFarolGemba(true);
+    setUserModalError("");
     setUserModalOpen(true);
   };
 
   const handleOpenEditUserModal = (u: UserProfile) => {
     setEditingUser(u);
-    setUserModalNome(u.nome);
-    setUserModalEmail(u.email);
+    setUserModalNome(u.nome || "");
+    setUserModalEmail(u.email || "");
     setUserModalCargo(u.cargo || "");
     setUserModalPassword("");
-    setUserModalPerfil(u.perfil === "Administrador" ? "Desenvolvedor/Admin" : (u.perfil as any));
+    setUserModalError("");
+
+    // Determine Perfil selection
+    const pNorm = String(u.perfil || "").trim().toLowerCase();
+    const cNorm = String(u.cargo || "").trim().toLowerCase();
+    if (pNorm === "desenvolvedor/admin" || pNorm === "administrador" || pNorm === "admin" || pNorm === "dev") {
+      setUserModalPerfil("Desenvolvedor/Admin");
+    } else if (pNorm === "gestor") {
+      setUserModalPerfil("Gestor");
+    } else if (pNorm === "visitante") {
+      setUserModalPerfil("Visitante");
+    } else if (cNorm.includes("líder") || cNorm.includes("lider") || pNorm === "líder de equipe" || pNorm === "lider de equipe") {
+      setUserModalPerfil("Líder de Equipe");
+    } else {
+      setUserModalPerfil("Supervisor");
+    }
+
     setUserModalStatus(u.ativo ? "Ativo" : "Inativo");
-    setUserModalParticipaFarolGemba(u.participaFarolGemba !== false && deveParticiparFarolGemba(u));
+    setUserModalParticipaFarolGemba(u.participaFarolGemba !== false);
     setUserModalOpen(true);
   };
 
   const handleSaveUser = async (e: React.FormEvent) => {
     e.preventDefault();
+    setUserModalError("");
     
     const emailLower = userModalEmail.trim().toLowerCase();
     const nomeTrim = userModalNome.trim();
     const cargoTrim = userModalCargo.trim();
 
-    if (!nomeTrim || !emailLower) {
-      alert("Por favor, preencha Nome e E-mail.");
+    if (!nomeTrim) {
+      const err = "Por favor, preencha o Nome Completo.";
+      setUserModalError(err);
+      showError(err);
+      return;
+    }
+    if (!emailLower) {
+      const err = "Por favor, preencha o E-mail de Acesso.";
+      setUserModalError(err);
+      showError(err);
+      return;
+    }
+    if (!cargoTrim) {
+      const err = "Por favor, preencha o Cargo ou Função.";
+      setUserModalError(err);
+      showError(err);
+      return;
+    }
+    if (!userModalPerfil) {
+      const err = "Por favor, selecione o Perfil de Permissão.";
+      setUserModalError(err);
+      showError(err);
       return;
     }
 
@@ -491,21 +573,23 @@ export default function ConfiguracoesView({
     // Count other active admins in system
     const activeAdminsCount = users.filter(
       u => u.id !== (editingUser?.id || "") && 
-      (u.perfil === "Desenvolvedor/Admin" || u.perfil === "Administrador") && 
+      (u.perfil === "Desenvolvedor/Admin" || u.perfil === "Administrador" || u.perfil === "admin") && 
       u.ativo
     ).length;
 
     // If we're editing the last active admin, and either inactivating them or demoting them:
     if (editingUser && 
-        (editingUser.perfil === "Desenvolvedor/Admin" || editingUser.perfil === "Administrador") && 
+        (editingUser.perfil === "Desenvolvedor/Admin" || editingUser.perfil === "Administrador" || editingUser.perfil === "admin") && 
         editingUser.ativo) {
       if ((isChangingToInactive || isChangingToNonAdmin) && activeAdminsCount === 0) {
-        alert("Não é permitido excluir ou inativar o único Administrador/Desenvolvedor ativo do sistema.");
+        const err = "Não é permitido excluir ou inativar o único Administrador/Desenvolvedor ativo do sistema.";
+        setUserModalError(err);
+        showError(err);
         return;
       }
     }
 
-    // Show change access confirmation if inactivating or deleting or altering status
+    // Show change access confirmation if inactivating or altering status/profile
     if (editingUser) {
       const statusChanged = editingUser.ativo !== (userModalStatus === "Ativo");
       const perfilChanged = editingUser.perfil !== userModalPerfil;
@@ -516,45 +600,95 @@ export default function ConfiguracoesView({
       }
     }
 
+    setIsSavingUser(true);
+
     try {
-      let userId = editingUser?.id || "";
-      if (!editingUser) {
+      // Map Perfil and Farol participation according to rules:
+      // If "Líder de Equipe (acesso Supervisor)":
+      //   perfil -> "supervisor"
+      //   cargo -> cargoTrim || "LÍDER DE EQUIPE"
+      //   participaFarolGemba -> false (or user selection)
+      let canonicalPerfil = "supervisor";
+      let canonicalCargo = cargoTrim;
+      let canonicalParticipaFarol = userModalParticipaFarolGemba;
+
+      if (userModalPerfil === "Desenvolvedor/Admin") {
+        canonicalPerfil = "Desenvolvedor/Admin";
+      } else if (userModalPerfil === "Gestor") {
+        canonicalPerfil = "Gestor";
+      } else if (userModalPerfil === "Visitante") {
+        canonicalPerfil = "visitante";
+      } else if (userModalPerfil === "Líder de Equipe") {
+        canonicalPerfil = "supervisor";
+        if (!canonicalCargo) {
+          canonicalCargo = "LÍDER DE EQUIPE";
+        }
+        // Líder de Equipe defaults to participaFarolGemba: false unless explicitly checked
+        canonicalParticipaFarol = userModalParticipaFarolGemba === true ? true : false;
+      } else {
+        // "Supervisor"
+        canonicalPerfil = "supervisor";
+      }
+
+      if (editingUser) {
+        // UPDATE EXISTING USER: doc(db, "users", editingUser.id)
+        await dbService.updateUser(editingUser.id, {
+          nome: nomeTrim,
+          email: emailLower,
+          cargo: canonicalCargo,
+          perfil: canonicalPerfil,
+          ativo: userModalStatus === "Ativo",
+          participaFarolGemba: canonicalParticipaFarol
+        });
+      } else {
+        // CREATE NEW USER
         if (!userModalPassword || userModalPassword.length < 6) {
-          showError("Informe uma senha temporária com pelo menos 6 caracteres.");
+          const err = "Informe uma senha temporária com pelo menos 6 caracteres.";
+          setUserModalError(err);
+          showError(err);
+          setIsSavingUser(false);
           return;
         }
-        userId = await dbService.registerUserInAuth(emailLower, userModalPassword);
+        const userId = await dbService.registerUserInAuth(emailLower, userModalPassword);
+        const newUser: UserProfile = {
+          id: userId,
+          nome: nomeTrim,
+          email: emailLower,
+          cargo: canonicalCargo,
+          perfil: canonicalPerfil,
+          ativo: userModalStatus === "Ativo",
+          participaFarolGemba: canonicalParticipaFarol,
+          primeiroAcesso: true,
+          deveAlterarSenha: true
+        };
+        await dbService.saveUser(newUser);
       }
-      const savedUser: UserProfile = {
-        id: userId,
-        nome: nomeTrim,
-        email: emailLower,
-        cargo: cargoTrim || undefined,
-        perfil: userModalPerfil,
-        ativo: userModalStatus === "Ativo",
-        participaFarolGemba: userModalParticipaFarolGemba,
-        primeiroAcesso: editingUser?.primeiroAcesso ?? true,
-        deveAlterarSenha: editingUser?.deveAlterarSenha ?? true
-      };
-      await dbService.saveUser(savedUser);
 
-      // If user is a Supervisor or has a supervisor record, keep it synchronized
+      // Keep supervisor record in sync if exists
       const matchingSup = supervisors.find(
         (s) => (s.email && s.email.toLowerCase() === emailLower) || s.nome.toLowerCase() === nomeTrim.toLowerCase()
       );
       if (matchingSup) {
         await dbService.updateSupervisor(matchingSup.id, {
-          participaFarolGemba: userModalParticipaFarolGemba
+          participaFarolGemba: canonicalParticipaFarol
         });
       }
 
       setUserModalOpen(false);
+      setEditingUser(null);
       setUserModalPassword("");
+      setUserModalError("");
       onRefreshDB();
       showSuccess(editingUser ? "Usuário atualizado com sucesso." : "Usuário criado. A senha temporária deverá ser alterada no primeiro acesso.");
     } catch (error: any) {
-      const message = error?.code === "auth/email-already-in-use" ? "Este e-mail já possui uma conta no Firebase Authentication." : (error?.message || "Não foi possível salvar o usuário.");
+      console.error("Erro ao salvar usuário:", error);
+      const message = error?.code === "auth/email-already-in-use"
+        ? "Este e-mail já possui uma conta no Firebase Authentication."
+        : (error?.message || "Não foi possível salvar o usuário.");
+      setUserModalError(message);
       showError(message);
+    } finally {
+      setIsSavingUser(false);
     }
   };
 
@@ -688,6 +822,51 @@ export default function ConfiguracoesView({
       showSuccess(`Limpeza concluída: ${Object.values(result).reduce((a, b) => a + b, 0)} duplicidade(s) removida(s).`);
     } catch (error: any) {
       showError(error?.message || "Não foi possível corrigir as duplicidades.");
+    }
+  };
+
+  const handleOpenStandardizePreview = async () => {
+    setStandardizeLoading(true);
+    setStandardizeResult(null);
+    try {
+      const preview = await dbService.previewStandardizeUserProfiles();
+      setStandardizePreview(preview);
+      setShowStandardizeModal(true);
+    } catch (error: any) {
+      console.error("Erro ao analisar perfis:", error);
+      showError("Erro ao analisar perfis de usuários no Firestore: " + (error?.message || error));
+    } finally {
+      setStandardizeLoading(false);
+    }
+  };
+
+  const handleExecuteStandardize = async () => {
+    setStandardizeLoading(true);
+    try {
+      const result = await dbService.standardizeUserProfiles();
+      setStandardizeResult(result);
+      onRefreshDB();
+      showSuccess(`Padronização concluída com sucesso! ${result.updatedCount} perfil(is) corrigido(s).`);
+    } catch (error: any) {
+      console.error("Erro ao executar padronização:", error);
+      showError("Erro ao executar padronização no Firestore: " + (error?.message || error));
+    } finally {
+      setStandardizeLoading(false);
+    }
+  };
+
+  const handleInitialize13Users = async () => {
+    if (!confirm("Deseja verificar e pré-autorizar os 13 usuários de liderança e segurança padrão com participaFarolGemba: false?")) return;
+    setStandardizeLoading(true);
+    try {
+      const res = await dbService.initializeStandard13Users();
+      onRefreshDB();
+      showSuccess(`Operação concluída: ${res.updated} atualizado(s), ${res.created} pré-autorizado(s).`);
+    } catch (error: any) {
+      console.error("Erro ao inicializar usuários padrão:", error);
+      showError("Erro ao processar usuários padrão: " + (error?.message || error));
+    } finally {
+      setStandardizeLoading(false);
     }
   };
 
@@ -1400,6 +1579,37 @@ export default function ConfiguracoesView({
             </div>
           </div>
 
+          {/* Standardization of Firestore Profiles */}
+          <div className="pt-6 border-t border-gray-100 space-y-3">
+            <span className="font-extrabold text-xs text-[#0B2E59] uppercase flex items-center gap-1.5">
+              <ShieldAlert size={14} className="text-[#F58220]" /> Padronização e Correção de Perfis (Firestore)
+            </span>
+            <p className="text-[11px] text-gray-500 leading-relaxed">
+              Analisa a coleção <code className="bg-gray-100 px-1 py-0.5 rounded text-[#0B2E59]">users</code> do Firestore, converte campos em maiúsculas (ex: <code>ATIVO</code>, <code>CARGO</code>, <code>NOME</code>) para o padrão canônico em minúsculas (<code>ativo</code>, <code>cargo</code>, <code>nome</code>, <code>participaFarolGemba</code>) e remove campos legados, restaurando o login de usuários bloqueados.
+            </p>
+            <div className="flex flex-wrap gap-2.5 pt-1">
+              <button
+                type="button"
+                onClick={handleOpenStandardizePreview}
+                disabled={standardizeLoading}
+                className="flex items-center gap-1.5 px-4 py-2 bg-[#0B2E59] hover:bg-[#133e72] text-white text-xs font-bold rounded-lg transition-colors cursor-pointer disabled:opacity-50"
+              >
+                {standardizeLoading ? <RefreshCw size={12} className="animate-spin" /> : <Sparkles size={12} className="text-[#F58220]" />}
+                Analisar e Padronizar Perfis
+              </button>
+
+              <button
+                type="button"
+                onClick={handleInitialize13Users}
+                disabled={standardizeLoading}
+                className="flex items-center gap-1.5 px-4 py-2 bg-gray-100 hover:bg-gray-200 text-[#0B2E59] text-xs font-bold rounded-lg transition-colors cursor-pointer disabled:opacity-50"
+              >
+                <Users size={12} />
+                Garantir 13 Usuários Padrão (Farol: false)
+              </button>
+            </div>
+          </div>
+
           {/* Reset System to Defaults */}
           <div className="pt-6 border-t border-gray-100 space-y-2">
             <span className="font-extrabold text-xs text-red-600 uppercase block">Área de Risco Técnico</span>
@@ -1744,12 +1954,19 @@ export default function ConfiguracoesView({
               </h3>
               <button
                 type="button"
-                onClick={() => setUserModalOpen(false)}
+                onClick={handleCloseUserModal}
                 className="p-1 hover:bg-slate-100 rounded text-gray-400 hover:text-gray-600 cursor-pointer"
               >
                 <X size={16} />
               </button>
             </div>
+
+            {/* Error Message inside modal */}
+            {userModalError && (
+              <div className="p-2.5 bg-red-50 border border-red-200 rounded-lg text-red-700 text-xs font-semibold">
+                {userModalError}
+              </div>
+            )}
 
             {/* Inputs Body */}
             <div className="space-y-3.5 text-xs">
@@ -1810,7 +2027,7 @@ export default function ConfiguracoesView({
               <div className="flex flex-col gap-1">
                 <label className="font-bold text-gray-600">Perfil de Permissão</label>
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-1">
-                  <label className={`flex items-center justify-center p-2 rounded-lg border cursor-pointer font-bold gap-1 text-[11px] transition-all ${
+                  <label className={`flex items-center justify-center p-2 rounded-lg border cursor-pointer font-bold gap-1 text-[11px] text-center transition-all ${
                     userModalPerfil === "Desenvolvedor/Admin"
                       ? "border-[#0B2E59] bg-blue-50/50 text-[#0B2E59]"
                       : "border-gray-200 hover:border-gray-300 text-gray-600"
@@ -1825,7 +2042,7 @@ export default function ConfiguracoesView({
                     />
                     Admin / Dev
                   </label>
-                  <label className={`flex items-center justify-center p-2 rounded-lg border cursor-pointer font-bold gap-1 text-[11px] transition-all ${
+                  <label className={`flex items-center justify-center p-2 rounded-lg border cursor-pointer font-bold gap-1 text-[11px] text-center transition-all ${
                     userModalPerfil === "Gestor"
                       ? "border-[#0B2E59] bg-blue-50/50 text-[#0B2E59]"
                       : "border-gray-200 hover:border-gray-300 text-gray-600"
@@ -1840,7 +2057,7 @@ export default function ConfiguracoesView({
                     />
                     Gestor
                   </label>
-                  <label className={`flex items-center justify-center p-2 rounded-lg border cursor-pointer font-bold gap-1 text-[11px] transition-all ${
+                  <label className={`flex items-center justify-center p-2 rounded-lg border cursor-pointer font-bold gap-1 text-[11px] text-center transition-all ${
                     userModalPerfil === "Supervisor"
                       ? "border-[#0B2E59] bg-blue-50/50 text-[#0B2E59]"
                       : "border-gray-200 hover:border-gray-300 text-gray-600"
@@ -1855,7 +2072,7 @@ export default function ConfiguracoesView({
                     />
                     Supervisor
                   </label>
-                  <label className={`flex items-center justify-center p-2 rounded-lg border cursor-pointer font-bold gap-1 text-[11px] transition-all ${
+                  <label className={`flex items-center justify-center p-2 rounded-lg border cursor-pointer font-bold gap-1 text-[10px] text-center leading-tight transition-all ${
                     userModalPerfil === "Líder de Equipe"
                       ? "border-[#0B2E59] bg-blue-50/50 text-[#0B2E59]"
                       : "border-gray-200 hover:border-gray-300 text-gray-600"
@@ -1865,10 +2082,15 @@ export default function ConfiguracoesView({
                       name="modalPerfil"
                       value="Líder de Equipe"
                       checked={userModalPerfil === "Líder de Equipe"}
-                      onChange={() => setUserModalPerfil("Líder de Equipe")}
+                      onChange={() => {
+                        setUserModalPerfil("Líder de Equipe");
+                        if (!userModalCargo) {
+                          setUserModalCargo("LÍDER DE EQUIPE");
+                        }
+                      }}
                       className="sr-only"
                     />
-                    Líder de Equipe
+                    Líder de Equipe (acesso Supervisor)
                   </label>
                 </div>
               </div>
@@ -1953,19 +2175,159 @@ export default function ConfiguracoesView({
             <div className="flex gap-3 pt-3 border-t border-gray-100">
               <button
                 type="button"
-                onClick={() => setUserModalOpen(false)}
-                className="flex-1 py-2.5 bg-gray-50 hover:bg-gray-100 border border-gray-200 text-gray-700 font-bold rounded-lg text-xs transition cursor-pointer"
+                disabled={isSavingUser}
+                onClick={handleCloseUserModal}
+                className="flex-1 py-2.5 bg-gray-50 hover:bg-gray-100 border border-gray-200 text-gray-700 font-bold rounded-lg text-xs transition cursor-pointer disabled:opacity-50"
               >
                 Cancelar
               </button>
               <button
                 type="submit"
-                className="flex-1 py-2.5 bg-[#0B2E59] hover:bg-[#071f3e] text-white font-bold rounded-lg text-xs transition cursor-pointer shadow-sm"
+                disabled={isSavingUser}
+                className="flex-1 py-2.5 bg-[#0B2E59] hover:bg-[#071f3e] text-white font-bold rounded-lg text-xs transition cursor-pointer shadow-sm flex items-center justify-center gap-2 disabled:opacity-50"
               >
-                Confirmar
+                {isSavingUser ? (
+                  <>
+                    <RefreshCw size={14} className="animate-spin" />
+                    Salvando...
+                  </>
+                ) : (
+                  "Confirmar"
+                )}
               </button>
             </div>
           </form>
+        </div>
+      )}
+
+      {/* STANDARDIZE PROFILES PREVIEW & CONFIRMATION MODAL */}
+      {showStandardizeModal && standardizePreview && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl max-w-2xl w-full p-6 shadow-2xl border border-gray-100 animate-scale-up space-y-5 max-h-[90vh] flex flex-col">
+            {/* Header */}
+            <div className="flex items-center justify-between border-b border-gray-100 pb-3">
+              <div className="flex items-center gap-2">
+                <div className="p-2 bg-blue-50 text-[#0B2E59] rounded-lg">
+                  <ShieldAlert size={20} className="text-[#F58220]" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-extrabold text-[#0B2E59]">
+                    Prévia de Padronização de Perfis (Firestore)
+                  </h3>
+                  <p className="text-[11px] text-gray-500">
+                    Auditoria de nomenclatura e conversão para campos canônicos
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowStandardizeModal(false)}
+                className="p-1 text-gray-400 hover:text-gray-600 rounded-lg"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* Metrics Bar */}
+            <div className="grid grid-cols-3 gap-3">
+              <div className="p-3 bg-gray-50 rounded-xl border border-gray-100 text-center">
+                <span className="text-[10px] uppercase font-extrabold text-gray-500 block">Total Analisado</span>
+                <span className="text-lg font-black text-[#0B2E59]">{standardizePreview.totalAnalyzed}</span>
+              </div>
+              <div className="p-3 bg-amber-50 rounded-xl border border-amber-100 text-center">
+                <span className="text-[10px] uppercase font-extrabold text-amber-700 block">A Corrigir</span>
+                <span className="text-lg font-black text-amber-700">{standardizePreview.toUpdate.length}</span>
+              </div>
+              <div className="p-3 bg-green-50 rounded-xl border border-green-100 text-center">
+                <span className="text-[10px] uppercase font-extrabold text-green-700 block">Já Canônicos</span>
+                <span className="text-lg font-black text-green-700">{standardizePreview.alreadyStandard}</span>
+              </div>
+            </div>
+
+            {/* Result Report if already executed */}
+            {standardizeResult && (
+              <div className="p-3 bg-green-50 border border-green-200 rounded-xl space-y-1">
+                <div className="flex items-center gap-1.5 text-xs font-bold text-green-800">
+                  <CheckCircle size={14} /> Padronização executada com sucesso no Firestore!
+                </div>
+                <p className="text-[11px] text-green-700">
+                  {standardizeResult.updatedCount} perfil(is) atualizado(s) e limpos.
+                </p>
+                {standardizeResult.errors.length > 0 && (
+                  <div className="text-[10px] text-red-600 space-y-0.5 pt-1">
+                    {standardizeResult.errors.map((err, i) => (
+                      <div key={i}>⚠️ {err}</div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Missing Info Warning */}
+            {standardizePreview.missingNameOrEmail.length > 0 && (
+              <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-amber-800 text-[11px] flex items-start gap-2">
+                <AlertTriangle size={15} className="shrink-0 mt-0.5" />
+                <div>
+                  <strong>Documentos com dados incompletos:</strong> {standardizePreview.missingNameOrEmail.length} documento(s) não possuem nome ou e-mail definidos.
+                </div>
+              </div>
+            )}
+
+            {/* Changes Detail List */}
+            <div className="flex-1 overflow-y-auto space-y-2.5 pr-1 max-h-72">
+              {standardizePreview.toUpdate.length === 0 ? (
+                <div className="p-6 text-center text-xs text-gray-500 bg-gray-50 rounded-xl border border-gray-100">
+                  <CheckCircle size={24} className="mx-auto text-green-600 mb-2" />
+                  Todos os perfis de usuários na coleção <strong>users</strong> já estão 100% canônicos e compatíveis!
+                </div>
+              ) : (
+                standardizePreview.toUpdate.map((item, idx) => (
+                  <div key={item.id || idx} className="p-3 bg-gray-50/80 border border-gray-200 rounded-xl space-y-1.5 text-xs">
+                    <div className="flex items-center justify-between">
+                      <div className="font-bold text-[#0B2E59]">
+                        {item.nome} <span className="text-gray-400 font-normal">({item.email})</span>
+                      </div>
+                      <span className="text-[10px] font-mono text-gray-400 bg-white px-1.5 py-0.5 rounded border">
+                        {item.id}
+                      </span>
+                    </div>
+
+                    <div className="space-y-1 pt-1 border-t border-gray-100">
+                      {item.changes.map((chg, cIdx) => (
+                        <div key={cIdx} className="text-[11px] text-gray-600 flex items-start gap-1.5">
+                          <span className="text-[#F58220] font-bold">•</span>
+                          <span>{chg}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+
+            {/* Modal Actions */}
+            <div className="flex items-center justify-between pt-3 border-t border-gray-100 gap-3">
+              <button
+                type="button"
+                onClick={() => setShowStandardizeModal(false)}
+                className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold rounded-lg text-xs transition cursor-pointer"
+              >
+                Fechar
+              </button>
+
+              {standardizePreview.toUpdate.length > 0 && !standardizeResult && (
+                <button
+                  type="button"
+                  onClick={handleExecuteStandardize}
+                  disabled={standardizeLoading}
+                  className="flex items-center gap-1.5 px-5 py-2 bg-[#F58220] hover:bg-orange-600 text-white font-extrabold rounded-lg text-xs transition cursor-pointer shadow-sm disabled:opacity-50"
+                >
+                  {standardizeLoading ? <RefreshCw size={13} className="animate-spin" /> : <Save size={13} />}
+                  Confirmar e Executar Padronização
+                </button>
+              )}
+            </div>
+          </div>
         </div>
       )}
     </div>

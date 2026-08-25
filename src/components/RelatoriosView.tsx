@@ -632,7 +632,7 @@ export default function RelatoriosView({
       pdf.save(`Relatorio_GEMBA_INSP_${selectedInspection.id.toUpperCase()}.pdf`);
 
       // Trigger notification for PDF generation
-      const supervisorName = supervisors.find(s => s.id === selectedInspection.supervisorId)?.nome || "Supervisor";
+      const supervisorName = getSupervisorName(selectedInspection.supervisorId);
       const launchType = getTipoLancamento(selectedInspection.atividade, selectedInspection.tipo);
       dbService.addNotification(supervisorName, "gerou um Relatório PDF", launchType);
     } catch (err) {

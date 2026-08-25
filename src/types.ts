@@ -55,6 +55,8 @@ export interface Supervisor {
   nome: string;
   email?: string;
   unidade?: string;
+  cargo?: string;
+  perfil?: string;
   metaSemanal?: number;
   metaMensal?: number;
   tipoMeta?: string;
@@ -147,13 +149,13 @@ export function getTipoLancamento(
 
   if (low.includes("dss") || chosenRaw === "DSS") return "DSS";
   if (low.includes("presenca") || low.includes("presença") || chosenRaw === "Presença em Campo") return "Presença em Campo";
-  if (low.includes("ar") || chosenRaw === "AR") return "AR";
-  if (low.includes("lvcc") || chosenRaw === "LVCC") return "LVCC";
   if (low.includes("desvio comportamental") || chosenRaw === "Desvio Comportamental") return "Desvio Comportamental";
   if (low.includes("dial") || chosenRaw === "DIAL") return "DIAL";
+  if (low.includes("lvcc") || chosenRaw === "LVCC") return "LVCC";
   if (low.includes("desvio estrutural") || chosenRaw === "Desvio Estrutural") return "Desvio Estrutural";
   if (low.includes("notificacao") || low.includes("notificação") || chosenRaw === "Notificação") return "Notificação";
   if (low.includes("interdicao") || low.includes("interdição") || chosenRaw === "Interdição") return "Interdição";
+  if (low === "ar" || low.startsWith("ar ") || low.startsWith("ar-") || low.startsWith("ar/") || low.includes("análise de risco") || low.includes("analise de risco") || chosenRaw === "AR") return "AR";
 
   return chosenRaw || "Outros";
 }

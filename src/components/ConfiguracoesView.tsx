@@ -38,10 +38,12 @@ import {
   CheckSquare,
   Info,
   Sparkles,
-  ShieldAlert
+  ShieldAlert,
+  Eye,
+  EyeOff
 } from "lucide-react";
 import { dbService } from "../services/db";
-import { deveParticiparFarolGemba, NAO_PARTICIPANTES_FAROL_GEMBA } from "../utils/operational";
+import { deveParticiparFarolGemba } from "../utils/operational";
 
 interface ConfiguracoesViewProps {
   supervisors: Supervisor[];
@@ -177,6 +179,7 @@ export default function ConfiguracoesView({
   const [userModalEmail, setUserModalEmail] = useState("");
   const [userModalCargo, setUserModalCargo] = useState("");
   const [userModalPassword, setUserModalPassword] = useState("");
+  const [showUserModalPassword, setShowUserModalPassword] = useState(false);
   const [userModalPerfil, setUserModalPerfil] = useState<"Desenvolvedor/Admin" | "Supervisor" | "Gestor" | "Líder de Equipe" | "Visitante">("Supervisor");
   const [userModalStatus, setUserModalStatus] = useState<"Ativo" | "Inativo">("Ativo");
   const [userModalParticipaFarolGemba, setUserModalParticipaFarolGemba] = useState<boolean>(true);
@@ -604,8 +607,8 @@ export default function ConfiguracoesView({
 
     try {
       // Map Perfil and Farol participation according to rules:
-      // If "Líder de Equipe (acesso Supervisor)":
-      //   perfil -> "supervisor"
+      // If "Líder de Equipe":
+      //   perfil -> "Líder de Equipe"
       //   cargo -> cargoTrim || "LÍDER DE EQUIPE"
       //   participaFarolGemba -> false (or user selection)
       let canonicalPerfil = "supervisor";
@@ -619,7 +622,7 @@ export default function ConfiguracoesView({
       } else if (userModalPerfil === "Visitante") {
         canonicalPerfil = "visitante";
       } else if (userModalPerfil === "Líder de Equipe") {
-        canonicalPerfil = "supervisor";
+        canonicalPerfil = "Líder de Equipe";
         if (!canonicalCargo) {
           canonicalCargo = "LÍDER DE EQUIPE";
         }
@@ -1999,15 +2002,25 @@ export default function ConfiguracoesView({
               {!editingUser && (
                 <div className="flex flex-col gap-1">
                   <label className="font-bold text-gray-600">Senha temporária</label>
-                  <input
-                    type="password"
-                    required
-                    minLength={6}
-                    placeholder="Será trocada no primeiro acesso"
-                    value={userModalPassword}
-                    onChange={(e) => setUserModalPassword(e.target.value)}
-                    className="bg-gray-50 border border-gray-200 rounded-lg p-2.5 text-gray-700 focus:outline-none focus:ring-1 focus:ring-[#0B2E59]"
-                  />
+                  <div className="relative flex items-center">
+                    <input
+                      type={showUserModalPassword ? "text" : "password"}
+                      required
+                      minLength={6}
+                      placeholder="Será trocada no primeiro acesso"
+                      value={userModalPassword}
+                      onChange={(e) => setUserModalPassword(e.target.value)}
+                      className="w-full bg-gray-50 border border-gray-200 rounded-lg p-2.5 pr-10 text-gray-700 focus:outline-none focus:ring-1 focus:ring-[#0B2E59]"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowUserModalPassword((prev) => !prev)}
+                      aria-label={showUserModalPassword ? "Ocultar senha" : "Mostrar senha"}
+                      className="absolute right-2.5 p-1 text-gray-400 hover:text-[#0B2E59] rounded cursor-pointer transition-colors focus:outline-none"
+                    >
+                      {showUserModalPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+                    </button>
+                  </div>
                 </div>
               )}
 
@@ -2090,7 +2103,7 @@ export default function ConfiguracoesView({
                       }}
                       className="sr-only"
                     />
-                    Líder de Equipe (acesso Supervisor)
+                    Líder de Equipe (acesso operacional)
                   </label>
                 </div>
               </div>

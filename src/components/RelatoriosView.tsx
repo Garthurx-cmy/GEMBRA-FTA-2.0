@@ -11,7 +11,6 @@ import { jsPDF } from "jspdf";
 import html2canvas from "html2canvas";
 import ResolvedImage from "./ResolvedImage";
 
-import assinaturaJhonata from "../assets/assinatura-jhonata.png?inline";
 
 interface RelatoriosViewProps {
   inspections: Inspection[];
@@ -183,7 +182,7 @@ export default function RelatoriosView({
     const set = new Set<string>();
     combinedInspections.forEach((i) => {
       if (i.tipo) set.add(i.tipo);
-      const resolved = getTipoLancamento(i.atividade, i.tipo);
+      const resolved = getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento);
       if (resolved) set.add(resolved);
     });
     return Array.from(set);
@@ -214,7 +213,7 @@ export default function RelatoriosView({
         return false;
       }
       if (selectedTipo) {
-        const itemTipoLancamento = getTipoLancamento(item.atividade, item.tipo);
+        const itemTipoLancamento = getTipoLancamento(item.atividade, item.tipo, item.tipoLancamento);
         if (item.tipo !== selectedTipo && itemTipoLancamento !== selectedTipo) {
           return false;
         }
@@ -282,8 +281,8 @@ export default function RelatoriosView({
   };
 
   const selectedInspection = inspections.find((i) => i.id === selectedId);
-  const isDSS = selectedInspection && getTipoLancamento(selectedInspection.atividade, selectedInspection.tipo) === "DSS";
-  const isPresenca = selectedInspection && getTipoLancamento(selectedInspection.atividade, selectedInspection.tipo) === "Presença em Campo";
+  const isDSS = selectedInspection && getTipoLancamento(selectedInspection.atividade, selectedInspection.tipo, selectedInspection.tipoLancamento) === "DSS";
+  const isPresenca = selectedInspection && getTipoLancamento(selectedInspection.atividade, selectedInspection.tipo, selectedInspection.tipoLancamento) === "Presença em Campo";
 
   // Helper resolvers
   const getSupervisorName = (id: string) => supervisors.find((s) => s.id === id)?.nome || dbService.getDeletedNames()[id] || "Outros";
@@ -633,7 +632,7 @@ export default function RelatoriosView({
 
       // Trigger notification for PDF generation
       const supervisorName = getSupervisorName(selectedInspection.supervisorId);
-      const launchType = getTipoLancamento(selectedInspection.atividade, selectedInspection.tipo);
+      const launchType = getTipoLancamento(selectedInspection.atividade, selectedInspection.tipo, selectedInspection.tipoLancamento);
       dbService.addNotification(supervisorName, "gerou um Relatório PDF", launchType);
     } catch (err) {
       console.error("Erro ao gerar PDF:", err);
@@ -1306,30 +1305,6 @@ export default function RelatoriosView({
                           )}
                         </div>
 
-                          {/* SIGNATURES & APPROVAL SECTION */}
-                          <div className="signature-section flex flex-col items-center justify-center pt-6 pb-4 border-t border-gray-100 text-center text-xs text-gray-500 break-inside-avoid page-break-inside-avoid">
-                            <div className="flex flex-col items-center justify-center space-y-1">
-                              <div className="signature-img-container mx-auto w-[190px] h-[75px] flex items-center justify-center relative select-none">
-                                <img 
-                                  src={assinaturaJhonata} 
-                                  alt="" 
-                                  className="signature-img report-signature-image max-w-[190px] max-h-[75px] w-auto h-auto object-contain" 
-                                  referrerPolicy="no-referrer"
-                                />
-                              </div>
-                              {/* Horizontal line with 240px width */}
-                              <div className="signature-line w-[240px] border-t border-gray-300 my-1 mx-auto"></div>
-                              <span className="signature-name block font-bold text-[#0B2E59] text-[14px]">
-                                Jhonata Santos
-                              </span>
-                              <span className="signature-role text-[10px] font-bold block text-slate-700 uppercase tracking-wide">
-                                GERENTE OPERACIONAL DOS CONTRATOS
-                              </span>
-                              <span className="signature-company text-[10px] font-bold block text-slate-500 uppercase tracking-wider">
-                                FTA SERVIÇOS INDUSTRIAIS
-                              </span>
-                            </div>
-                          </div>
                         </div>
                       </td>
                     </tr>

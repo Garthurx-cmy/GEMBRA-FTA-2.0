@@ -251,7 +251,11 @@ export default function HistoricoView({
     refreshTrigger
   ]);
 
-  const isTeamLeader = currentUser?.perfil === "Líder de Equipe" || currentUser?.perfil === "Lider de Equipe";
+  const isCarijunio = Boolean(
+    currentUser?.nome?.toLowerCase().includes("carijunio") ||
+    currentUser?.email?.toLowerCase().includes("carijunio")
+  );
+  const isTeamLeader = (currentUser?.perfil === "Líder de Equipe" || currentUser?.perfil === "Lider de Equipe") && !isCarijunio;
   const isOwnInspection = (item: Inspection) => {
     if (!currentUser) return false;
     if (item.criadoPorUid && item.criadoPorUid === currentUser.id) return true;
@@ -283,7 +287,7 @@ export default function HistoricoView({
       // Contract filter
       if (selectedContract !== "all" && item.contratoId !== selectedContract) return false;
       // Tipo filter
-      if (selectedTipo !== "all" && getTipoLancamento(item.atividade, item.tipo) !== selectedTipo) return false;
+      if (selectedTipo !== "all" && getTipoLancamento(item.atividade, item.tipo, item.tipoLancamento) !== selectedTipo) return false;
       // Status filter
       if (selectedStatus !== "all" && item.status !== selectedStatus) return false;
       // Potencial filter
@@ -538,7 +542,7 @@ export default function HistoricoView({
                   {/* Tipo de Lançamento */}
                   <td className="py-3.5 px-3">
                     {(() => {
-                      const typeName = getTipoLancamento(item.atividade, item.tipo);
+                      const typeName = getTipoLancamento(item.atividade, item.tipo, item.tipoLancamento);
                       const conf = TIPO_LANCAMENTO_CONFIG[typeName];
                       return (
                         <span
@@ -558,7 +562,7 @@ export default function HistoricoView({
                   </td>
                   {/* Potencial */}
                   <td className="py-3.5 px-3">
-                    {getTipoLancamento(item.atividade, item.tipo) === "Presença em Campo" ? (
+                    {getTipoLancamento(item.atividade, item.tipo, item.tipoLancamento) === "Presença em Campo" ? (
                       <span className="text-gray-400 italic text-[11px]">N/A</span>
                     ) : (
                       <span className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold ${getPotentialBadge(item.potencial)}`}>
@@ -568,7 +572,7 @@ export default function HistoricoView({
                   </td>
                   {/* Status */}
                   <td className="py-3.5 px-3">
-                    {getTipoLancamento(item.atividade, item.tipo) === "Presença em Campo" ? (
+                    {getTipoLancamento(item.atividade, item.tipo, item.tipoLancamento) === "Presença em Campo" ? (
                       <span className="text-gray-400 italic text-[11px]">N/A</span>
                     ) : (
                       <span className={`inline-block px-2 py-0.5 rounded text-[10px] font-extrabold ${getStatusBadge(item.status)}`}>
@@ -578,7 +582,7 @@ export default function HistoricoView({
                   </td>
                   {/* Responsavel */}
                   <td className="py-3.5 px-3 text-gray-500 max-w-[120px] truncate">
-                    {getTipoLancamento(item.atividade, item.tipo) === "Presença em Campo" ? "-" : item.responsavel}
+                    {getTipoLancamento(item.atividade, item.tipo, item.tipoLancamento) === "Presença em Campo" ? "-" : item.responsavel}
                   </td>
                   {/* Actions column */}
                   <td className="py-3.5 px-4">
@@ -730,7 +734,7 @@ export default function HistoricoView({
               {/* Categorization indicators */}
               <div className="flex flex-wrap gap-2 text-xs">
                 {(() => {
-                  const typeName = getTipoLancamento(viewingInspection.atividade, viewingInspection.tipo);
+                  const typeName = getTipoLancamento(viewingInspection.atividade, viewingInspection.tipo, viewingInspection.tipoLancamento);
                   const conf = TIPO_LANCAMENTO_CONFIG[typeName];
                   return (
                     <span className={`px-2.5 py-1 rounded font-bold border flex items-center gap-1 ${conf ? `${conf.bgClass} ${conf.textClass} ${conf.borderClass}` : "bg-gray-100 text-gray-800 border-gray-200"}`}>
@@ -739,7 +743,7 @@ export default function HistoricoView({
                     </span>
                   );
                 })()}
-                {getTipoLancamento(viewingInspection.atividade, viewingInspection.tipo) !== "Presença em Campo" && (
+                {getTipoLancamento(viewingInspection.atividade, viewingInspection.tipo, viewingInspection.tipoLancamento) !== "Presença em Campo" && (
                   <>
                     <span className={`px-2.5 py-1 rounded font-bold ${getPotentialBadge(viewingInspection.potencial)}`}>
                       Risco: {viewingInspection.potencial}
@@ -752,7 +756,7 @@ export default function HistoricoView({
               </div>
 
               {/* Presença em Campo Stats */}
-              {getTipoLancamento(viewingInspection.atividade, viewingInspection.tipo) === "Presença em Campo" && viewingInspection.quantidadeParticipantes !== undefined && (
+              {getTipoLancamento(viewingInspection.atividade, viewingInspection.tipo, viewingInspection.tipoLancamento) === "Presença em Campo" && viewingInspection.quantidadeParticipantes !== undefined && (
                 <div className="space-y-1 bg-teal-50 p-3 rounded-lg border border-teal-200 text-xs flex justify-between items-center">
                   <span className="font-bold text-teal-800 uppercase tracking-wider">Participantes Abordados</span>
                   <span className="font-black text-teal-900 bg-teal-100 px-2.5 py-1 rounded-md text-sm shrink-0">
@@ -764,7 +768,7 @@ export default function HistoricoView({
               {/* Desvio Description */}
               <div className="space-y-1">
                 <span className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider">
-                  {getTipoLancamento(viewingInspection.atividade, viewingInspection.tipo) === "Presença em Campo" ? "Descrição da Presença em Campo" : "Descrição do Desvio"}
+                  {getTipoLancamento(viewingInspection.atividade, viewingInspection.tipo, viewingInspection.tipoLancamento) === "Presença em Campo" ? "Descrição da Presença em Campo" : "Descrição do Desvio"}
                 </span>
                 <p className="text-xs text-gray-700 bg-gray-50 p-3 rounded-lg leading-relaxed border-l-4 border-[#0B2E59]">
                   {viewingInspection.descricao}
@@ -772,7 +776,7 @@ export default function HistoricoView({
               </div>
 
               {/* Ação Corretiva */}
-              {getTipoLancamento(viewingInspection.atividade, viewingInspection.tipo) !== "Presença em Campo" && (
+              {getTipoLancamento(viewingInspection.atividade, viewingInspection.tipo, viewingInspection.tipoLancamento) !== "Presença em Campo" && (
                 <div className="space-y-1">
                   <span className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider">Ação Corretiva Aplicada/Proposta</span>
                   <p className="text-xs text-gray-700 bg-gray-50 p-3 rounded-lg leading-relaxed border-l-4 border-green-500">
@@ -782,7 +786,7 @@ export default function HistoricoView({
               )}
 
               {/* Action meta */}
-              {getTipoLancamento(viewingInspection.atividade, viewingInspection.tipo) !== "Presença em Campo" && (
+              {getTipoLancamento(viewingInspection.atividade, viewingInspection.tipo, viewingInspection.tipoLancamento) !== "Presença em Campo" && (
                 <div className="grid grid-cols-2 gap-4 text-xs border-t border-gray-50 pt-4">
                   <div>
                     <span className="block text-[10px] text-gray-400 font-bold uppercase">Responsável pela Ação</span>

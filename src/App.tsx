@@ -6,10 +6,10 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { auth, db } from "./services/firebase";
 import { onAuthStateChanged, signInWithEmailAndPassword, signOut, setPersistence, browserLocalPersistence, browserSessionPersistence, sendPasswordResetEmail, updatePassword } from "firebase/auth";
-import { doc, getDoc, updateDoc as fbUpdateDoc, serverTimestamp } from "firebase/firestore";
+import { doc, getDoc, onSnapshot, updateDoc as fbUpdateDoc, serverTimestamp } from "firebase/firestore";
 
 const updateDoc = async (ref: any, data: any) => {
-  if (process.env.NODE_ENV !== "production") {
+  if (import.meta.env.DEV) {
     const path = ref && typeof ref.path === "string" ? ref.path : "unknown-path";
     console.trace("[FIRESTORE WRITE]", path, "updateDoc", data);
   }
@@ -25,6 +25,8 @@ import {
   SystemConfig,
   UserProfile,
   InspectionStatus,
+  GrupoContrato,
+  GrupoContratoFiltro,
   getTipoLancamento,
   TIPO_LANCAMENTO_CONFIG,
   AppNotification
@@ -38,7 +40,7 @@ import RelatoriosView from "./components/RelatoriosView";
 import ExportacoesView from "./components/ExportacoesView";
 import ConfiguracoesView from "./components/ConfiguracoesView";
 import ResolvedImage from "./components/ResolvedImage";
-import { CheckCircle, AlertCircle, Building2, Bell, Search, FileText, X, ExternalLink } from "lucide-react";
+import { CheckCircle, AlertCircle, Building2, Bell, Search, FileText, X, ExternalLink, Eye, EyeOff } from "lucide-react";
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<string>("dashboard");
@@ -77,17 +79,66 @@ export default function App() {
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
   const [loginEmail, setLoginEmail] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
+  const [showLoginPassword, setShowLoginPassword] = useState(false);
   const [rememberMe, setRememberMe] = useState(true);
   const [loginError, setLoginError] = useState("");
   const [authLoading, setAuthLoading] = useState(true);
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+  const [showNewPassword, setShowNewPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+  const [isResettingPassword, setIsResettingPassword] = useState(false);
+  const [resetSuccessMsg, setResetSuccessMsg] = useState("");
+  const [isChangingPassword, setIsChangingPassword] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
 
-  // --- GLOBAL SEARCH & MONTH FILTER STATES ---
+  // --- GLOBAL SEARCH, MONTH & CONTRACT GROUP FILTER STATES ---
   const [globalSearchTerm, setGlobalSearchTerm] = useState("");
   const [viewingGlobalInspection, setViewingGlobalInspection] = useState<Inspection | null>(null);
   const [selectedMonth, setSelectedMonth] = useState<string>("auto");
+  const [grupoContratoSelecionado, setGrupoContratoSelecionadoState] = useState<GrupoContratoFiltro>("todos");
+
+  const permittedGruposContrato: GrupoContrato[] = useMemo(() => {
+    if (!currentUser) return ["vale", "vli"];
+    if (currentUser.gruposContratoPermitidos && currentUser.gruposContratoPermitidos.length > 0) {
+      return currentUser.gruposContratoPermitidos;
+    }
+    return ["vale", "vli"];
+  }, [currentUser]);
+
+  // Sync default or stored preference when currentUser changes
+  useEffect(() => {
+    if (!currentUser) return;
+    const permitted = permittedGruposContrato;
+    const storageKey = `gemba_selected_contract_${currentUser.id}`;
+    let saved: GrupoContratoFiltro | null = null;
+    try {
+      saved = localStorage.getItem(storageKey) as GrupoContratoFiltro | null;
+    } catch (_) {}
+
+    if (permitted.length === 1) {
+      setGrupoContratoSelecionadoState(permitted[0]);
+    } else if (saved && (saved === "todos" || saved === "vale" || saved === "vli")) {
+      setGrupoContratoSelecionadoState(saved);
+    } else {
+      setGrupoContratoSelecionadoState("todos");
+    }
+  }, [currentUser?.id, permittedGruposContrato]);
+
+  const setGrupoContratoSelecionado = (novoGrupo: GrupoContratoFiltro) => {
+    const permitido = novoGrupo === "todos"
+      ? permittedGruposContrato.length > 1
+      : permittedGruposContrato.includes(novoGrupo);
+    if (!permitido) return;
+
+    if (currentUser) {
+      const storageKey = `gemba_selected_contract_${currentUser.id}`;
+      try {
+        localStorage.setItem(storageKey, novoGrupo);
+      } catch (_) {}
+    }
+    setGrupoContratoSelecionadoState(novoGrupo);
+  };
 
   // Unified operational supervisors (collection supervisors + operational users + currentUser)
   const unifiedSupervisors = useMemo(() => {
@@ -103,7 +154,7 @@ export default function App() {
       const contractCode = contract ? contract.codigo : "";
       const contractName = contract ? contract.nome : "";
       const area = areas.find((a) => a.id === insp.areaId)?.nome || dbService.getDeletedNames()[insp.areaId] || "";
-      const typeName = getTipoLancamento(insp.atividade, insp.tipo);
+      const typeName = getTipoLancamento(insp.atividade, insp.tipo, insp.tipoLancamento);
       
       return (
         insp.id.toLowerCase().includes(term) ||
@@ -178,17 +229,8 @@ export default function App() {
     };
   }, []);
 
-  // Debounce ref to manage and throttle dynamic listener synchronization
-  const syncTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-
-  // Centralized dynamic listener synchronization manager
+  // Centralized unified listener synchronization manager
   useEffect(() => {
-    // Clear any pending sync execution to prevent overlapping/duplicate listeners
-    if (syncTimeoutRef.current) {
-      clearTimeout(syncTimeoutRef.current);
-      syncTimeoutRef.current = null;
-    }
-
     if (!currentUser) {
       dbService.stopSync(true); // Logout: clear cache & cancel listeners
       setIsSyncing(false);
@@ -201,30 +243,18 @@ export default function App() {
       return;
     }
 
-    // visible + online + authenticated: Set syncing state and schedule synchronization with a 1-second debounce
+    // visible + online + authenticated: start global sync immediately
     setIsSyncing(true);
+    dbService.startSync(currentUser);
+    refreshDatabaseStates();
 
-    syncTimeoutRef.current = setTimeout(() => {
-      // Ensure any previously active listeners are stopped right before starting new ones to prevent leaks
-      dbService.stopSync(false);
+    // Auto-reconciliation for admin profile
+    if (currentUser.perfil === "Desenvolvedor/Admin" || currentUser.perfil === "Administrador") {
+      dbService.reconcileSupervisors();
+    }
 
-      // Preload metadata (now cached internally to prevent repeating getDocs)
-      dbService.preloadMetadata().then(() => {
-        refreshDatabaseStates();
-      });
-
-      dbService.startSync(currentUser, activeTab);
-      refreshDatabaseStates();
-
-      setIsSyncing(false);
-    }, 1000);
-
-    return () => {
-      if (syncTimeoutRef.current) {
-        clearTimeout(syncTimeoutRef.current);
-      }
-    };
-  }, [currentUser?.id, activeTab, isVisible, isOnline]);
+    setIsSyncing(false);
+  }, [currentUser?.id, isVisible, isOnline]);
 
   // Firebase Authentication is the only session source. Firestore listeners start
   // only after authentication, avoiding permission errors on the login screen.
@@ -234,86 +264,149 @@ export default function App() {
       setAuthLoading(false);
       return;
     }
+
+    let profileUnsubscribe: (() => void) | null = null;
+
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
-      setAuthLoading(true);
+      if (profileUnsubscribe) {
+        profileUnsubscribe();
+        profileUnsubscribe = null;
+      }
+
+      if (!firebaseUser) {
+        dbService.stopSync(true);
+        setCurrentUser(null);
+        setAuthLoading(false);
+        return;
+      }
+
+      // 1. Check offline local cache for fast startup
+      const cacheKey = `gemba_profile_${firebaseUser.uid}`;
       try {
-        if (!firebaseUser) {
-          dbService.stopSync(true);
-          setCurrentUser(null);
-          setAuthLoading(false);
-          return;
-        }
-        let profileSnap: any = null;
-        try {
-          profileSnap = await getDoc(doc(db, "users", firebaseUser.uid));
-        } catch (readErr: any) {
-          console.error("Erro ao ler documento de perfil:", readErr);
-          await signOut(auth);
-          setLoginError("O Firestore negou a leitura do seu perfil. Verifique se o documento utiliza o mesmo UID da conta e se as regras foram publicadas.");
-          setAuthLoading(false);
-          return;
-        }
-
-        if (!profileSnap || !profileSnap.exists()) {
-          await signOut(auth);
-          setLoginError("Conta autenticada, mas o perfil não foi encontrado. O administrador deve criar um documento na coleção users utilizando exatamente o UID da conta.");
-          setAuthLoading(false);
-          return;
-        }
-
-        const rawProfileData: any = profileSnap.data();
-        if (hasLegacyUppercaseFields(rawProfileData)) {
-          console.warn("Aviso: Perfil do usuário contém campos legados em maiúsculas. Carregado temporariamente em memória via normalizeUserProfile.", rawProfileData);
-        }
-        const profile: UserProfile = normalizeUserProfile(rawProfileData, profileSnap.id);
-
-        if (!profile.ativo) {
-          await signOut(auth);
-          setLoginError("Seu perfil está inativo. Procure o administrador.");
-          setAuthLoading(false);
-          return;
-        }
-        setCurrentUser(profile);
-        
-        let shouldUpdateLogin = true;
-        if (profile && profile.ultimoLogin) {
-          try {
-            let lastLoginDate: Date | null = null;
-            if (profile.ultimoLogin && typeof profile.ultimoLogin.toDate === "function") {
-              lastLoginDate = profile.ultimoLogin.toDate();
-            } else if (profile.ultimoLogin && typeof profile.ultimoLogin === "object" && (profile.ultimoLogin as any).seconds) {
-              lastLoginDate = new Date((profile.ultimoLogin as any).seconds * 1000);
-            } else if (profile.ultimoLogin) {
-              lastLoginDate = new Date(profile.ultimoLogin);
-            }
-            if (lastLoginDate && !isNaN(lastLoginDate.getTime())) {
-              const diffMs = Date.now() - lastLoginDate.getTime();
-              // Grava no máximo uma vez a cada 24 horas (86400000 ms)
-              if (diffMs < 24 * 60 * 60 * 1000) {
-                shouldUpdateLogin = false;
-              }
-            }
-          } catch (e) {
-            console.warn("Erro ao ler ultimoLogin do perfil:", e);
+        const cachedRaw = localStorage.getItem(cacheKey);
+        if (cachedRaw) {
+          const parsed = JSON.parse(cachedRaw);
+          if (parsed && parsed.id === firebaseUser.uid && parsed.ativo) {
+            setCurrentUser(parsed);
+            setAuthLoading(false);
           }
         }
-
-        if (shouldUpdateLogin) {
-          await updateDoc(doc(db, "users", firebaseUser.uid), { ultimoLogin: serverTimestamp() }).catch(() => undefined);
-        }
-        setTimeout(refreshDatabaseStates, 100);
-      } catch (error: any) {
-        console.error("Erro na autenticação/leitura do perfil:", error);
-        if (error?.code === "permission-denied" || error?.message?.toLowerCase().includes("permission") || error?.message?.toLowerCase().includes("insufficient")) {
-          setLoginError("O Firestore negou a leitura do seu perfil. Verifique se o documento utiliza o mesmo UID da conta e se as regras foram publicadas.");
-        } else {
-          setLoginError("Não foi possível carregar seu perfil de acesso.");
-        }
-      } finally {
-        setAuthLoading(false);
+      } catch (e) {
+        console.warn("Erro ao ler perfil do cache local:", e);
       }
+
+      setAuthLoading(true);
+
+      // 2. Subscribe to user profile document via onSnapshot for real-time and offline tolerance
+      const userDocRef = doc(db, "users", firebaseUser.uid);
+      profileUnsubscribe = onSnapshot(
+        userDocRef,
+        async (profileSnap) => {
+          try {
+            if (!profileSnap.exists()) {
+              // Only sign out if we know for certain document does not exist
+              console.warn("Perfil não encontrado no Firestore para UID:", firebaseUser.uid);
+              localStorage.removeItem(cacheKey);
+              await signOut(auth);
+              setLoginError("Conta autenticada, mas o perfil de acesso não foi encontrado. Procure o administrador.");
+              setAuthLoading(false);
+              return;
+            }
+
+            const rawProfileData: any = profileSnap.data();
+            if (hasLegacyUppercaseFields(rawProfileData)) {
+              console.warn("Aviso: Perfil do usuário contém campos legados em maiúsculas.", rawProfileData);
+            }
+            const profile: UserProfile = normalizeUserProfile(rawProfileData, profileSnap.id);
+
+            if (!profile.ativo) {
+              localStorage.removeItem(cacheKey);
+              await signOut(auth);
+              setLoginError("Seu acesso está inativo. Procure o administrador.");
+              setAuthLoading(false);
+              return;
+            }
+
+            // Save valid active profile in local storage
+            try {
+              localStorage.setItem(cacheKey, JSON.stringify(profile));
+            } catch (_) {}
+
+            setCurrentUser(profile);
+            setLoginError(null);
+            setAuthLoading(false);
+
+            // Update ultimoLogin if more than 24h passed
+            let shouldUpdateLogin = true;
+            if (profile.ultimoLogin) {
+              try {
+                let lastLoginDate: Date | null = null;
+                if (profile.ultimoLogin && typeof profile.ultimoLogin.toDate === "function") {
+                  lastLoginDate = profile.ultimoLogin.toDate();
+                } else if (profile.ultimoLogin && typeof profile.ultimoLogin === "object" && (profile.ultimoLogin as any).seconds) {
+                  lastLoginDate = new Date((profile.ultimoLogin as any).seconds * 1000);
+                } else if (profile.ultimoLogin) {
+                  lastLoginDate = new Date(profile.ultimoLogin);
+                }
+                if (lastLoginDate && !isNaN(lastLoginDate.getTime())) {
+                  const diffMs = Date.now() - lastLoginDate.getTime();
+                  if (diffMs < 24 * 60 * 60 * 1000) {
+                    shouldUpdateLogin = false;
+                  }
+                }
+              } catch (e) {
+                console.warn("Erro ao ler ultimoLogin do perfil:", e);
+              }
+            }
+
+            if (shouldUpdateLogin) {
+              updateDoc(userDocRef, { ultimoLogin: serverTimestamp() }).catch(() => undefined);
+            }
+            setTimeout(refreshDatabaseStates, 100);
+          } catch (err: any) {
+            console.error("Erro ao processar dados de perfil:", err);
+            setAuthLoading(false);
+          }
+        },
+        async (error: any) => {
+          console.warn("Aviso na escuta do documento de perfil:", error);
+          const isPermissionError =
+            error?.code === "permission-denied" ||
+            error?.message?.toLowerCase().includes("permission") ||
+            error?.message?.toLowerCase().includes("insufficient");
+
+          if (isPermissionError) {
+            localStorage.removeItem(cacheKey);
+            await signOut(auth);
+            setLoginError("Foi encontrada uma inconsistência no perfil de acesso. Procure o administrador.");
+            setAuthLoading(false);
+            return;
+          }
+
+          // In case of network / offline issues, use cached profile if available
+          try {
+            const cachedRaw = localStorage.getItem(cacheKey);
+            if (cachedRaw) {
+              const parsed = JSON.parse(cachedRaw);
+              if (parsed && parsed.ativo) {
+                setCurrentUser(parsed);
+                setAuthLoading(false);
+                return;
+              }
+            }
+          } catch (_) {}
+
+          setAuthLoading(false);
+        }
+      );
     });
-    return unsubscribe;
+
+    return () => {
+      if (profileUnsubscribe) {
+        profileUnsubscribe();
+      }
+      unsubscribe();
+    };
   }, []);
 
   const triggerAlert = (text: string, type: "success" | "error" = "success") => {
@@ -428,9 +521,25 @@ export default function App() {
   const handleLoginByEmail = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoginError("");
+    setResetSuccessMsg("");
+    const normalizedEmail = loginEmail.trim().toLowerCase();
+    if (!normalizedEmail) {
+      setLoginError("Por favor, preencha o e-mail de acesso.");
+      return;
+    }
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(normalizedEmail)) {
+      setLoginError("O formato do e-mail informado é inválido.");
+      return;
+    }
+    if (!loginPassword) {
+      setLoginError("Por favor, preencha a senha.");
+      return;
+    }
+
     try {
       await setPersistence(auth, rememberMe ? browserLocalPersistence : browserSessionPersistence);
-      await signInWithEmailAndPassword(auth, loginEmail.trim().toLowerCase(), loginPassword);
+      await signInWithEmailAndPassword(auth, normalizedEmail, loginPassword);
     } catch (error: any) {
       console.warn("Erro ao realizar login:", error?.code || error?.message);
       if (
@@ -439,46 +548,157 @@ export default function App() {
         error?.code === "auth/wrong-password" ||
         error?.code === "auth/invalid-login-credentials"
       ) {
-        setLoginError("E-mail ou senha incorretos. Verifique os dados digitados.");
+        setLoginError("Não foi possível entrar. Confira seu e-mail e senha ou utilize ‘Esqueci minha senha’.");
       } else if (error?.code === "auth/too-many-requests") {
         setLoginError("Muitas tentativas sem sucesso. Aguarde alguns minutos ou redefina sua senha.");
       } else if (error?.code === "auth/user-disabled") {
-        setLoginError("Esta conta de usuário foi desativada pelo administrador.");
+        setLoginError("Seu acesso está inativo. Procure o administrador.");
       } else if (error?.code === "auth/invalid-email") {
         setLoginError("O formato do e-mail informado é inválido.");
+      } else if (error?.code === "auth/network-request-failed") {
+        setLoginError("Falha de conexão com os serviços de autenticação. Verifique sua conexão com a internet.");
       } else {
-        setLoginError("Não foi possível entrar. Verifique seu e-mail e senha.");
+        setLoginError("Não foi possível entrar. Confira seu e-mail e senha ou utilize ‘Esqueci minha senha’.");
       }
     }
   };
 
   const handlePasswordReset = async () => {
-    if (!loginEmail.trim()) {
-      setLoginError("Informe seu e-mail para recuperar a senha.");
+    setLoginError("");
+    setResetSuccessMsg("");
+    const normalizedEmail = loginEmail.trim().toLowerCase();
+    if (!normalizedEmail) {
+      setLoginError("Informe seu e-mail de acesso para recuperar a senha.");
       return;
     }
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(normalizedEmail)) {
+      setLoginError("O formato do e-mail informado é inválido.");
+      return;
+    }
+
+    setIsResettingPassword(true);
     try {
-      await sendPasswordResetEmail(auth, loginEmail.trim().toLowerCase());
-      triggerAlert("E-mail de recuperação enviado.");
-    } catch {
-      setLoginError("Não foi possível enviar o e-mail de recuperação.");
+      const actionCodeSettings = {
+        url: "https://gembafta20.netlify.app",
+        handleCodeInApp: false
+      };
+      await sendPasswordResetEmail(auth, normalizedEmail, actionCodeSettings);
+      setResetSuccessMsg(
+        "Se existir uma conta cadastrada para este e-mail, enviaremos as instruções para redefinição da senha. Verifique também a caixa de spam."
+      );
+    } catch (error: any) {
+      console.warn("Erro ao enviar redefinição de senha:", error?.code || error?.message);
+      if (
+        error?.code === "auth/user-not-found" ||
+        error?.code === "auth/invalid-credential"
+      ) {
+        // Não expor se determinado e-mail está ou não cadastrado
+        setResetSuccessMsg(
+          "Se existir uma conta cadastrada para este e-mail, enviaremos as instruções para redefinição da senha. Verifique também a caixa de spam."
+        );
+      } else if (error?.code === "auth/invalid-email") {
+        setLoginError("O formato do e-mail informado é inválido.");
+      } else if (error?.code === "auth/too-many-requests") {
+        setLoginError("Muitas tentativas em pouco tempo. Aguarde alguns minutos antes de tentar novamente.");
+      } else if (error?.code === "auth/network-request-failed") {
+        setLoginError("Falha de conexão com os serviços de autenticação. Verifique sua conexão com a internet.");
+      } else if (
+        error?.code === "auth/unauthorized-continue-uri" ||
+        error?.code === "auth/domain-not-allowed" ||
+        error?.message?.toLowerCase().includes("continue-uri") ||
+        error?.message?.toLowerCase().includes("domain")
+      ) {
+        setLoginError("O domínio da aplicação (gembafta20.netlify.app) precisa ser adicionado aos Domínios Autorizados no Firebase Console.");
+      } else {
+        setLoginError("Ocorreu um erro ao processar a recuperação de senha. Tente novamente.");
+      }
+    } finally {
+      setIsResettingPassword(false);
     }
   };
 
   const handleFirstPasswordChange = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newPassword || newPassword.length < 6) return setLoginError("A nova senha deve ter pelo menos 6 caracteres.");
-    if (newPassword !== confirmPassword) return setLoginError("As senhas não conferem.");
-    if (!auth.currentUser || !currentUser) return;
+    setLoginError("");
+    if (!newPassword || newPassword.length < 6) {
+      setLoginError("A nova senha deve ter pelo menos 6 caracteres.");
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setLoginError("As senhas não conferem. Verifique a confirmação digitada.");
+      return;
+    }
+    if (!auth.currentUser || !currentUser) {
+      setLoginError("Sessão não identificada. Entre novamente.");
+      return;
+    }
+
+    setIsChangingPassword(true);
     try {
+      // 1. Update password in Firebase Auth only
       await updatePassword(auth.currentUser, newPassword);
-      await updateDoc(doc(db, "users", currentUser.id), { primeiroAcesso: false, deveAlterarSenha: false, updatedAt: serverTimestamp() });
-      setCurrentUser({ ...currentUser, primeiroAcesso: false, deveAlterarSenha: false });
-      setNewPassword(""); setConfirmPassword("");
-      triggerAlert("Senha criada com sucesso.");
+
+      // 2. Only after success, update Firestore document flags
+      await updateDoc(doc(db, "users", currentUser.id), {
+        primeiroAcesso: false,
+        deveAlterarSenha: false,
+        updatedAt: serverTimestamp()
+      });
+
+      // 3. Update local user state
+      const updatedProfile = {
+        ...currentUser,
+        primeiroAcesso: false,
+        deveAlterarSenha: false
+      };
+      setCurrentUser(updatedProfile);
+      try {
+        localStorage.setItem(`gemba_profile_${currentUser.id}`, JSON.stringify(updatedProfile));
+      } catch (_) {}
+
+      setNewPassword("");
+      setConfirmPassword("");
+      triggerAlert("Senha criada com sucesso! Seja bem-vindo.", "success");
+    } catch (error: any) {
+      console.error("Erro ao atualizar senha no Firebase Auth:", error);
+      if (error?.code === "auth/requires-recent-login") {
+        setLoginError("Por segurança, sua sessão expirou para troca de senha. Saia e entre novamente com sua senha temporária.");
+      } else if (error?.code === "auth/weak-password") {
+        setLoginError("A senha escolhida é muito fraca. Utilize letras, números ou caracteres especiais.");
+      } else {
+        setLoginError("Não foi possível alterar a senha. Tente novamente ou entre em contato com o suporte.");
+      }
+    } finally {
+      setIsChangingPassword(false);
+    }
+  };
+
+  const handleConfirmAlreadyReset = async () => {
+    if (!auth.currentUser || !currentUser) return;
+    setLoginError("");
+    setIsChangingPassword(true);
+    try {
+      await updateDoc(doc(db, "users", currentUser.id), {
+        primeiroAcesso: false,
+        deveAlterarSenha: false,
+        updatedAt: serverTimestamp()
+      });
+      const updatedProfile = {
+        ...currentUser,
+        primeiroAcesso: false,
+        deveAlterarSenha: false
+      };
+      setCurrentUser(updatedProfile);
+      try {
+        localStorage.setItem(`gemba_profile_${currentUser.id}`, JSON.stringify(updatedProfile));
+      } catch (_) {}
+      triggerAlert("Acesso confirmado com sucesso!", "success");
     } catch (error) {
-      console.error(error);
-      setLoginError("Não foi possível alterar a senha. Entre novamente e tente outra vez.");
+      console.error("Erro ao confirmar acesso pós-redefinição:", error);
+      setLoginError("Não foi possível confirmar o acesso. Por favor, cadastre uma nova senha nos campos acima.");
+    } finally {
+      setIsChangingPassword(false);
     }
   };
 
@@ -521,22 +741,59 @@ export default function App() {
                 onChange={(e) => {
                   setLoginEmail(e.target.value);
                   setLoginError("");
+                  setResetSuccessMsg("");
                 }}
                 className="bg-slate-50 border border-slate-200 focus:border-[#0B2E59] rounded-lg p-2.5 text-xs text-gray-700 focus:outline-none focus:ring-1 focus:ring-[#0B2E59] focus:bg-white transition-all font-medium"
               />
             </div>
             <div className="flex flex-col gap-1">
               <label className="text-[11px] font-bold text-gray-600 uppercase tracking-wider">Senha</label>
-              <input type="password" required value={loginPassword} onChange={(e) => { setLoginPassword(e.target.value); setLoginError(""); }} className="bg-slate-50 border border-slate-200 focus:border-[#0B2E59] rounded-lg p-2.5 text-xs text-gray-700 focus:outline-none focus:ring-1 focus:ring-[#0B2E59] focus:bg-white transition-all font-medium" />
+              <div className="relative flex items-center">
+                <input
+                  type={showLoginPassword ? "text" : "password"}
+                  required
+                  placeholder="Sua senha"
+                  value={loginPassword}
+                  onChange={(e) => {
+                    setLoginPassword(e.target.value);
+                    setLoginError("");
+                  }}
+                  className="w-full bg-slate-50 border border-slate-200 focus:border-[#0B2E59] rounded-lg p-2.5 pr-10 text-xs text-gray-700 focus:outline-none focus:ring-1 focus:ring-[#0B2E59] focus:bg-white transition-all font-medium"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowLoginPassword((prev) => !prev)}
+                  aria-label={showLoginPassword ? "Ocultar senha" : "Mostrar senha"}
+                  className="absolute right-2.5 p-1 text-slate-400 hover:text-[#0B2E59] rounded cursor-pointer transition-colors focus:outline-none"
+                >
+                  {showLoginPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+                </button>
+              </div>
             </div>
             <div className="flex items-center justify-between text-[11px]">
-              <label className="flex items-center gap-2 text-gray-600 cursor-pointer"><input type="checkbox" checked={rememberMe} onChange={(e) => setRememberMe(e.target.checked)} /> Lembrar de mim</label>
-              <button type="button" onClick={handlePasswordReset} className="text-[#0B2E59] font-bold hover:underline">Esqueci minha senha</button>
+              <label className="flex items-center gap-2 text-gray-600 cursor-pointer">
+                <input type="checkbox" checked={rememberMe} onChange={(e) => setRememberMe(e.target.checked)} /> Lembrar de mim
+              </label>
+              <button
+                type="button"
+                onClick={handlePasswordReset}
+                disabled={isResettingPassword}
+                className="text-[#0B2E59] font-bold hover:underline disabled:opacity-50 cursor-pointer"
+              >
+                {isResettingPassword ? "Enviando..." : "Esqueci minha senha"}
+              </button>
             </div>
 
             {loginError && (
               <p className="text-[11px] text-red-500 font-bold flex items-center gap-1 bg-red-50 p-2 rounded">
-                <AlertCircle size={12} /> {loginError}
+                <AlertCircle size={12} className="shrink-0" /> <span>{loginError}</span>
+              </p>
+            )}
+
+            {resetSuccessMsg && (
+              <p className="text-[11px] text-green-700 font-semibold flex items-start gap-1.5 bg-green-50 border border-green-200 p-2.5 rounded-lg">
+                <CheckCircle size={14} className="shrink-0 mt-0.5 text-green-600" />
+                <span>{resetSuccessMsg}</span>
               </p>
             )}
 
@@ -555,15 +812,114 @@ export default function App() {
 
   if (currentUser && (currentUser.primeiroAcesso || currentUser.deveAlterarSenha)) {
     return (
-      <div className="h-screen w-screen bg-[#0B2E59] flex items-center justify-center p-4">
-        <form onSubmit={handleFirstPasswordChange} className="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-md space-y-4">
-          <img src={config.logoUrl || "/logo-fta.png"} className="h-14 mx-auto object-contain" />
-          <div className="text-center"><h1 className="font-extrabold text-[#0B2E59]">Crie sua senha de acesso</h1><p className="text-xs text-gray-500 mt-1">Por segurança, defina uma nova senha pessoal antes de continuar.</p></div>
-          <input type="password" required placeholder="Nova senha" value={newPassword} onChange={e => setNewPassword(e.target.value)} className="w-full border rounded-lg p-3 text-sm" />
-          <input type="password" required placeholder="Confirmar nova senha" value={confirmPassword} onChange={e => setConfirmPassword(e.target.value)} className="w-full border rounded-lg p-3 text-sm" />
-          {loginError && <p className="text-xs text-red-600">{loginError}</p>}
-          <button className="w-full bg-[#0B2E59] text-white rounded-lg p-3 text-sm font-bold">Salvar nova senha</button>
-        </form>
+      <div className="h-screen w-screen bg-[#0B2E59] flex items-center justify-center p-4 relative overflow-hidden">
+        {/* Subtle background glow */}
+        <div className="absolute top-[-20%] left-[-10%] w-[50%] h-[50%] bg-[#F58220]/5 rounded-full blur-[120px] pointer-events-none" />
+        <div className="absolute bottom-[-20%] right-[-10%] w-[50%] h-[50%] bg-blue-500/5 rounded-full blur-[120px] pointer-events-none" />
+
+        <div className="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-md space-y-5 border border-slate-100 relative z-10 animate-fade-in">
+          {/* Logo Brand Header */}
+          <div className="flex flex-col items-center text-center space-y-2">
+            <div className="w-48 h-16 flex items-center justify-center p-2 rounded-xl bg-slate-50 border border-slate-100">
+              {config?.logoUrl ? (
+                <img src={config.logoUrl} alt="Logo" className="max-h-full max-w-full object-contain" referrerPolicy="no-referrer" />
+              ) : (
+                <span className="font-bold text-[#0B2E59]">GEMBA FTA</span>
+              )}
+            </div>
+            <div className="space-y-1 mt-2">
+              <h1 className="text-lg font-extrabold text-[#0B2E59] tracking-tight">Crie sua senha de acesso</h1>
+              <p className="text-xs text-gray-500 font-medium">Por segurança, defina uma nova senha pessoal para continuar.</p>
+            </div>
+          </div>
+
+          <form onSubmit={handleFirstPasswordChange} className="space-y-4">
+            <div className="flex flex-col gap-1">
+              <label className="text-[11px] font-bold text-gray-600 uppercase tracking-wider">Nova Senha</label>
+              <div className="relative flex items-center">
+                <input
+                  type={showNewPassword ? "text" : "password"}
+                  required
+                  placeholder="Mínimo 6 caracteres"
+                  minLength={6}
+                  value={newPassword}
+                  onChange={e => { setNewPassword(e.target.value); setLoginError(""); }}
+                  className="w-full bg-slate-50 border border-slate-200 focus:border-[#0B2E59] rounded-lg p-2.5 pr-10 text-xs text-gray-700 focus:outline-none focus:ring-1 focus:ring-[#0B2E59] focus:bg-white transition-all font-medium"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowNewPassword(prev => !prev)}
+                  aria-label={showNewPassword ? "Ocultar senha" : "Mostrar senha"}
+                  className="absolute right-2.5 p-1 text-slate-400 hover:text-[#0B2E59] rounded cursor-pointer transition-colors focus:outline-none"
+                >
+                  {showNewPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+                </button>
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-1">
+              <label className="text-[11px] font-bold text-gray-600 uppercase tracking-wider">Confirmar Nova Senha</label>
+              <div className="relative flex items-center">
+                <input
+                  type={showConfirmPassword ? "text" : "password"}
+                  required
+                  placeholder="Repita a nova senha"
+                  minLength={6}
+                  value={confirmPassword}
+                  onChange={e => { setConfirmPassword(e.target.value); setLoginError(""); }}
+                  className="w-full bg-slate-50 border border-slate-200 focus:border-[#0B2E59] rounded-lg p-2.5 pr-10 text-xs text-gray-700 focus:outline-none focus:ring-1 focus:ring-[#0B2E59] focus:bg-white transition-all font-medium"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowConfirmPassword(prev => !prev)}
+                  aria-label={showConfirmPassword ? "Ocultar senha" : "Mostrar senha"}
+                  className="absolute right-2.5 p-1 text-slate-400 hover:text-[#0B2E59] rounded cursor-pointer transition-colors focus:outline-none"
+                >
+                  {showConfirmPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+                </button>
+              </div>
+            </div>
+
+            {loginError && (
+              <p className="text-[11px] text-red-500 font-bold flex items-center gap-1 bg-red-50 p-2 rounded">
+                <AlertCircle size={12} className="shrink-0" /> <span>{loginError}</span>
+              </p>
+            )}
+
+            <button
+              type="submit"
+              disabled={isChangingPassword}
+              className="w-full py-2.5 bg-[#0B2E59] hover:bg-[#071f3e] disabled:opacity-50 text-white font-bold rounded-lg text-xs cursor-pointer transition-colors shadow-sm"
+            >
+              {isChangingPassword ? "Gravando nova senha..." : "Salvar nova senha e acessar"}
+            </button>
+          </form>
+
+          {/* Fallback option for users who just reset password via email link */}
+          <div className="pt-2 border-t border-slate-100 text-center">
+            <button
+              type="button"
+              onClick={handleConfirmAlreadyReset}
+              disabled={isChangingPassword}
+              className="text-[11px] text-slate-500 hover:text-[#0B2E59] font-medium hover:underline cursor-pointer"
+            >
+              Já redefiniu sua senha pelo link de e-mail? <span className="font-bold text-[#0B2E59]">Clique aqui para continuar</span>
+            </button>
+          </div>
+
+          <div className="text-center">
+            <button
+              type="button"
+              onClick={async () => {
+                await signOut(auth);
+                setCurrentUser(null);
+              }}
+              className="text-[11px] text-red-500 hover:underline font-bold cursor-pointer"
+            >
+              Cancelar e Sair
+            </button>
+          </div>
+        </div>
       </div>
     );
   }
@@ -647,7 +1003,7 @@ export default function App() {
             {globalSearchResults.length > 0 && (
               <div className="absolute left-0 right-0 mt-1.5 bg-white border border-slate-200 rounded-xl shadow-xl z-50 max-h-60 overflow-y-auto divide-y divide-slate-100 font-medium">
                 {globalSearchResults.map((insp) => {
-                  const typeName = getTipoLancamento(insp.atividade, insp.tipo);
+                  const typeName = getTipoLancamento(insp.atividade, insp.tipo, insp.tipoLancamento);
                   const conf = TIPO_LANCAMENTO_CONFIG[typeName];
                   const sup = resolveSupervisorName(insp.supervisorId, unifiedSupervisors, users, currentUser, dbService.getDeletedNames());
 
@@ -803,6 +1159,9 @@ export default function App() {
                 onSelectMonth={setSelectedMonth}
                 onEditInspection={handleEditInspectionInitiate}
                 onSelectTab={setActiveTab}
+                grupoContrato={grupoContratoSelecionado}
+                onSelectGrupoContrato={setGrupoContratoSelecionado}
+                permittedGruposContrato={permittedGruposContrato}
               />
             )}
 
@@ -850,10 +1209,15 @@ export default function App() {
               <RankingView
                 inspections={inspections}
                 supervisors={unifiedSupervisors}
+                contracts={contracts}
+                areas={areas}
                 users={users}
                 currentUser={currentUser}
                 selectedMonth={selectedMonth}
                 onSelectMonth={setSelectedMonth}
+                grupoContrato={grupoContratoSelecionado}
+                onSelectGrupoContrato={setGrupoContratoSelecionado}
+                permittedGruposContrato={permittedGruposContrato}
               />
             )}
 
@@ -966,7 +1330,7 @@ export default function App() {
               {/* Categorization indicators */}
               <div className="flex flex-wrap gap-2 text-xs font-bold">
                 {(() => {
-                  const typeName = getTipoLancamento(viewingGlobalInspection.atividade, viewingGlobalInspection.tipo);
+                  const typeName = getTipoLancamento(viewingGlobalInspection.atividade, viewingGlobalInspection.tipo, viewingGlobalInspection.tipoLancamento);
                   const conf = TIPO_LANCAMENTO_CONFIG[typeName];
                   return (
                     <span className={`px-2.5 py-1 rounded border flex items-center gap-1 ${conf ? `${conf.bgClass} ${conf.textClass} ${conf.borderClass}` : "bg-gray-100 text-gray-800 border-gray-200"}`}>

@@ -5,8 +5,17 @@
  */
 import {
   Inspection, Supervisor, Area, Contract, SystemConfig, UserProfile,
-  AppNotification, AuthorizedEmail, InspectionStatus, getTipoLancamento
+  AppNotification, AuthorizedEmail, InspectionStatus, getTipoLancamento, GrupoContrato,
+  LegacyReconciliationItem, LegacyReconciliationPreview
 } from "../types";
+import { isOperationalRole } from "../utils/supervisors";
+import {
+  getInspectionGrupoContrato,
+  isFarolVli,
+  isSupervisorFromGrupoContrato,
+  getGrupoContratoPorLocalidade,
+  getContractGroup
+} from "../utils/operational";
 import { auth, db, hasFirebase } from "./firebase";
 import {
   collection, doc,
@@ -91,7 +100,7 @@ const onSnapshot = (ref: any, ...args: any[]) => {
 
 // Trace helper for writes in development
 const setDoc = async (ref: any, data: any, options?: any) => {
-  if (process.env.NODE_ENV !== "production") {
+  if (import.meta.env.DEV) {
     const path = ref && typeof ref.path === "string" ? ref.path : "unknown-path";
     console.trace("[FIRESTORE WRITE]", path, "setDoc", data);
   }
@@ -99,7 +108,7 @@ const setDoc = async (ref: any, data: any, options?: any) => {
 };
 
 const updateDoc = async (ref: any, data: any) => {
-  if (process.env.NODE_ENV !== "production") {
+  if (import.meta.env.DEV) {
     const path = ref && typeof ref.path === "string" ? ref.path : "unknown-path";
     console.trace("[FIRESTORE WRITE]", path, "updateDoc", data);
   }
@@ -107,7 +116,7 @@ const updateDoc = async (ref: any, data: any) => {
 };
 
 const deleteDoc = async (ref: any) => {
-  if (process.env.NODE_ENV !== "production") {
+  if (import.meta.env.DEV) {
     const path = ref && typeof ref.path === "string" ? ref.path : "unknown-path";
     console.trace("[FIRESTORE WRITE]", path, "deleteDoc");
   }
@@ -116,7 +125,7 @@ const deleteDoc = async (ref: any) => {
 
 const writeBatch = (firestoreInstance: any) => {
   const batch = fbWriteBatch(firestoreInstance);
-  if (process.env.NODE_ENV !== "production") {
+  if (import.meta.env.DEV) {
     console.trace("[FIRESTORE WRITE] Batch created");
   }
   return batch;
@@ -173,13 +182,18 @@ export function normalizarPerfil(rawRole?: any): string {
     return "Gestor";
   }
   if (
-    p === "supervisor" ||
     p === "lider" ||
     p === "líder" ||
     p === "lider de equipe" ||
     p === "líder de equipe" ||
+    p === "lider_equipe" ||
     p === "lider de equipe - mec" ||
-    p === "líder de equipe - mecânica" ||
+    p === "líder de equipe - mecânica"
+  ) {
+    return "Líder de Equipe";
+  }
+  if (
+    p === "supervisor" ||
     p === "engenheiro de segurança" ||
     p === "analista de segurança"
   ) {
@@ -250,7 +264,13 @@ export function normalizeUserProfile(data: any, docId?: string): UserProfile {
 
   // 6. perfil: normalizarPerfil(data.perfil ?? data.PERFIL ?? data.role ?? "visitante")
   const rawPerfil = data.perfil ?? data.PERFIL ?? data.role ?? (email === "visitante@grupofta.com.br" ? "visitante" : "supervisor");
-  const perfil = normalizarPerfil(rawPerfil);
+  let perfil = normalizarPerfil(rawPerfil);
+  // Perfis legados de líderes eram gravados como "supervisor". O cargo é usado
+  // como sinal canônico para restaurar a permissão correta sem perder acesso operacional.
+  const cargoNormalizado = normalize(cargo);
+  if (perfil === "supervisor" && (cargoNormalizado.includes("lider de equipe") || cargoNormalizado === "lider")) {
+    perfil = "Líder de Equipe";
+  }
 
   // 7. primeiroAcesso: data.primeiroAcesso ?? data.PRIMEIROACESSO ?? false
   let primeiroAcesso = false;
@@ -266,6 +286,33 @@ export function normalizeUserProfile(data: any, docId?: string): UserProfile {
     participaFarolGemba = typeof data.participaFarolGemba === "string" ? data.participaFarolGemba.toLowerCase() === "true" : Boolean(data.participaFarolGemba);
   }
 
+  // 9. gruposContratoPermitidos: ["vale"], ["vli"], ou ["vale", "vli"]
+  let gruposContratoPermitidos: GrupoContrato[] = [];
+  if (Array.isArray(data.gruposContratoPermitidos)) {
+    gruposContratoPermitidos = data.gruposContratoPermitidos
+      .map((g: any) => String(g).toLowerCase().trim() as GrupoContrato)
+      .filter((g: any) => g === "vale" || g === "vli");
+  } else if (typeof data.grupoContrato === "string") {
+    const g = data.grupoContrato.toLowerCase().trim();
+    if (g === "vale" || g === "vli") gruposContratoPermitidos = [g as GrupoContrato];
+  } else if (typeof data.contrato === "string") {
+    const g = data.contrato.toLowerCase().trim();
+    if (g.includes("vale") && g.includes("vli")) gruposContratoPermitidos = ["vale", "vli"];
+    else if (g.includes("vli")) gruposContratoPermitidos = ["vli"];
+    else if (g.includes("vale")) gruposContratoPermitidos = ["vale"];
+  }
+
+  // Fallback padrão se não especificado
+  if (gruposContratoPermitidos.length === 0) {
+    if (perfil === "Desenvolvedor/Admin" || perfil === "Administrador" || perfil === "Gestor") {
+      gruposContratoPermitidos = ["vale", "vli"];
+    } else if (isFarolVli({ nome, email, id: docId || data.id, participaFarolGemba })) {
+      gruposContratoPermitidos = ["vli"];
+    } else {
+      gruposContratoPermitidos = ["vale"];
+    }
+  }
+
   return {
     id: docId || data.id || "",
     nome,
@@ -274,6 +321,7 @@ export function normalizeUserProfile(data: any, docId?: string): UserProfile {
     cargo,
     ativo,
     participaFarolGemba,
+    gruposContratoPermitidos,
     primeiroAcesso,
     deveAlterarSenha,
     ultimoLogin: data.ultimoLogin ?? data.ULTIMOLOGIN ?? data.lastLogin ?? null
@@ -293,6 +341,18 @@ class DBService {
   private syncActive = false;
   private unsubscribers: Array<() => void> = [];
   private metadataPreloaded = false;
+  private hasReconciledSupervisors = false;
+
+  private readiness = {
+    configReady: false,
+    deletedNamesReady: false,
+    notificationsReady: false,
+    supervisorsReady: false,
+    areasReady: false,
+    contractsReady: false,
+    inspectionsReady: false,
+    usersReady: false
+  };
 
   private convert(value: any): any {
     if (Array.isArray(value)) return value.map(v => this.convert(v));
@@ -307,89 +367,244 @@ class DBService {
     window.dispatchEvent(new CustomEvent("gemba_fta_db_update", { detail: { key } }));
   }
 
-  startSync(currentProfile?: UserProfile, activeTab?: string): void {
+  getReadinessState(currentProfile?: UserProfile | null) {
+    const isAdmin = currentProfile?.perfil === "Desenvolvedor/Admin" || currentProfile?.perfil === "Administrador";
+    const profileReady = !!currentProfile;
+    const settingsReady = this.readiness.configReady;
+    const supervisorsReady = this.readiness.supervisorsReady;
+    const areasReady = this.readiness.areasReady;
+    const contractsReady = this.readiness.contractsReady;
+    const inspectionsReady = this.readiness.inspectionsReady;
+    const usersReady = !isAdmin || this.readiness.usersReady;
+
+    const appDataReady = profileReady && settingsReady && supervisorsReady && areasReady && contractsReady && inspectionsReady && usersReady;
+
+    return {
+      profileReady,
+      settingsReady,
+      supervisorsReady,
+      areasReady,
+      contractsReady,
+      inspectionsReady,
+      usersReady,
+      appDataReady
+    };
+  }
+
+  startSync(currentProfile?: UserProfile): void {
     if (this.syncActive || !hasFirebase || !db) return;
     this.syncActive = true;
 
-    const currentTab = activeTab || "dashboard";
     const isAdmin = currentProfile?.perfil === "Desenvolvedor/Admin" || currentProfile?.perfil === "Administrador";
+    const isGestor = currentProfile?.perfil === "Gestor";
+    
+    // Determine permitted contract groups
+    const permittedGroups: GrupoContrato[] = (isAdmin || isGestor)
+      ? ["vale", "vli"]
+      : (currentProfile?.gruposContratoPermitidos && currentProfile.gruposContratoPermitidos.length > 0
+          ? currentProfile.gruposContratoPermitidos
+          : ["vale", "vli"]);
 
-    // 1. Settings (config) - always needed when active
+    // 1. Settings (config) - Global listener
     this.unsubscribers.push(onSnapshot(doc(db, "settings", "config"), snap => {
       this.config = snap.exists() ? ({ ...DEFAULT_CONFIG, ...this.convert(snap.data()) } as SystemConfig) : DEFAULT_CONFIG;
+      this.readiness.configReady = true;
       this.emit("config");
-    }, err => console.error("Falha ao sincronizar configurações:", err)));
+    }, err => {
+      console.error("Falha ao sincronizar configurações:", err);
+      this.readiness.configReady = true;
+    }));
 
-    // 2. Deleted Names - always needed to resolve deleted item labels
+    // 2. Deleted Names - Global listener
     this.unsubscribers.push(onSnapshot(collection(db, "deleted_names"), snap => {
       this.deletedNames = Object.fromEntries(snap.docs.map(d => [d.id, d.data().name || "Registro removido"]));
+      this.readiness.deletedNamesReady = true;
       this.emit("deleted_names");
-    }, err => console.error("Falha ao sincronizar nomes removidos:", err)));
+    }, err => {
+      console.error("Falha ao sincronizar nomes removidos:", err);
+      this.readiness.deletedNamesReady = true;
+    }));
 
-    // 3. Notifications - always needed for alert badge
+    // 3. Notifications - Global listener
     this.unsubscribers.push(onSnapshot(query(collection(db, "notifications"), orderBy("createdAt", "desc"), limit(20)), snap => {
       this.notifications = snap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as AppNotification));
+      this.readiness.notificationsReady = true;
       this.emit("notifications");
-    }, err => console.error("Falha ao sincronizar notificações:", err)));
+    }, err => {
+      console.error("Falha ao sincronizar notificações:", err);
+      this.readiness.notificationsReady = true;
+    }));
 
-    // 4. Page/Tab Specific Sourcing
-    if (currentTab === "dashboard" || currentTab === "farol" || currentTab === "ranking") {
-      // Dashboard needs inspections
-      this.unsubscribers.push(onSnapshot(query(collection(db, "inspections"), orderBy("data", "desc"), limit(1000)), snap => {
-        this.inspections = snap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as Inspection));
-        this.emit("inspections");
-      }, err => console.error("Falha ao sincronizar inspeções do Dashboard:", err)));
-    } else if (currentTab === "historico" || currentTab === "relatorios" || currentTab === "lancar") {
-      // These pages need supervisors, areas, and contracts for selects and display
-      this.unsubscribers.push(onSnapshot(collection(db, "supervisors"), snap => {
-        this.supervisors = snap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as Supervisor));
-        this.emit("supervisors");
-      }, err => console.error("Falha ao sincronizar supervisores:", err)));
-
-      this.unsubscribers.push(onSnapshot(collection(db, "areas"), snap => {
-        this.areas = snap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as Area));
-        this.emit("areas");
-      }, err => console.error("Falha ao sincronizar áreas:", err)));
-
-      this.unsubscribers.push(onSnapshot(collection(db, "contracts"), snap => {
-        this.contracts = snap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as Contract));
-        this.emit("contracts");
-      }, err => console.error("Falha ao sincronizar contratos:", err)));
-    } else if (currentTab === "configuracoes") {
-      // Configuracoes page needs admin tables
-      this.unsubscribers.push(onSnapshot(collection(db, "supervisors"), snap => {
-        this.supervisors = snap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as Supervisor));
-        this.emit("supervisors");
-      }, err => console.error("Falha ao sincronizar supervisores:", err)));
-
-      this.unsubscribers.push(onSnapshot(collection(db, "areas"), snap => {
-        this.areas = snap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as Area));
-        this.emit("areas");
-      }, err => console.error("Falha ao sincronizar áreas:", err)));
-
-      this.unsubscribers.push(onSnapshot(collection(db, "contracts"), snap => {
-        this.contracts = snap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as Contract));
-        this.emit("contracts");
-      }, err => console.error("Falha ao sincronizar contratos:", err)));
-
-      if (isAdmin) {
-        this.unsubscribers.push(onSnapshot(collection(db, "users"), snap => {
-          this.users = snap.docs.map(d => normalizeUserProfile(this.convert(d.data()), d.id));
-          this.emit("users");
-        }, err => console.error("Falha ao sincronizar usuários:", err)));
-
-        this.unsubscribers.push(onSnapshot(collection(db, "authorized_emails"), snap => {
-          this.authorizedEmails = snap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as AuthorizedEmail));
-          this.emit("authorized_emails");
-        }, err => console.error("Falha ao sincronizar e-mails autorizados:", err)));
+    // 4. Supervisors - Operational directory filtered by contract permission
+    this.unsubscribers.push(onSnapshot(collection(db, "supervisors"), snap => {
+      const allSups = snap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as Supervisor));
+      if (permittedGroups.length === 1) {
+        const targetGroup = permittedGroups[0];
+        this.supervisors = allSups.filter(s => isSupervisorFromGrupoContrato(s, targetGroup));
+      } else {
+        this.supervisors = allSups;
       }
+      this.readiness.supervisorsReady = true;
+      this.emit("supervisors");
+    }, err => {
+      console.error("Falha ao sincronizar supervisores:", err);
+      this.readiness.supervisorsReady = true;
+    }));
+
+    // 5. Areas - Filtered by contract permission
+    this.unsubscribers.push(onSnapshot(collection(db, "areas"), snap => {
+      const allAreas = snap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as Area));
+      if (permittedGroups.length === 1) {
+        const targetGroup = permittedGroups[0];
+        this.areas = allAreas.filter(a => getGrupoContratoPorLocalidade(a, allAreas, this.contracts) === targetGroup);
+      } else {
+        this.areas = allAreas;
+      }
+      this.readiness.areasReady = true;
+      this.emit("areas");
+    }, err => {
+      console.error("Falha ao sincronizar áreas:", err);
+      this.readiness.areasReady = true;
+    }));
+
+    // 6. Contracts - Filtered by contract permission
+    this.unsubscribers.push(onSnapshot(collection(db, "contracts"), snap => {
+      const allContracts = snap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as Contract));
+      if (permittedGroups.length === 1) {
+        const targetGroup = permittedGroups[0];
+        this.contracts = allContracts.filter(c => {
+          const g = c.grupoContrato || (getContractGroup(c.id, allContracts).toLowerCase() as GrupoContrato);
+          return g === targetGroup;
+        });
+      } else {
+        this.contracts = allContracts;
+      }
+      this.readiness.contractsReady = true;
+      this.emit("contracts");
+    }, err => {
+      console.error("Falha ao sincronizar contratos:", err);
+      this.readiness.contractsReady = true;
+    }));
+
+    // 7. Inspections - Origin-level filtering at Firestore query
+    let inspQuery;
+    if (permittedGroups.length === 1) {
+      inspQuery = query(
+        collection(db, "inspections"),
+        where("grupoContrato", "==", permittedGroups[0]),
+        limit(1000)
+      );
+    } else {
+      inspQuery = query(
+        collection(db, "inspections"),
+        where("grupoContrato", "in", ["vale", "vli"]),
+        limit(1000)
+      );
     }
+
+    this.unsubscribers.push(onSnapshot(inspQuery, snap => {
+      this.inspections = snap.docs
+        .map(d => ({ id: d.id, ...this.convert(d.data()) } as Inspection))
+        .sort((a, b) => {
+          const da = a.data || "";
+          const db = b.data || "";
+          if (da !== db) return db.localeCompare(da);
+          return (b.createdAt || "").localeCompare(a.createdAt || "");
+        });
+      this.readiness.inspectionsReady = true;
+      this.emit("inspections");
+    }, err => {
+      console.error("Falha ao sincronizar inspeções com filtro de origem:", err);
+      // Fallback in case of index delay
+      this.readiness.inspectionsReady = true;
+    }));
+
+    // 8. Admin-Only Collections: users & authorized_emails + one-time reconciliation
+    if (isAdmin) {
+      this.unsubscribers.push(onSnapshot(collection(db, "users"), snap => {
+        this.users = snap.docs.map(d => normalizeUserProfile(this.convert(d.data()), d.id));
+        this.readiness.usersReady = true;
+        this.emit("users");
+      }, err => {
+        console.error("Falha ao sincronizar usuários:", err);
+        this.readiness.usersReady = true;
+      }));
+
+      this.unsubscribers.push(onSnapshot(collection(db, "authorized_emails"), snap => {
+        this.authorizedEmails = snap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as AuthorizedEmail));
+        this.emit("authorized_emails");
+      }, err => console.error("Falha ao sincronizar e-mails autorizados:", err)));
+
+      // Trigger automatic supervisor operational directory reconciliation once
+      this.reconcileSupervisors(currentProfile).catch(e => {
+        console.warn("Reconciliação automática de supervisores finalizada com aviso:", e);
+      });
+    } else {
+      this.readiness.usersReady = true;
+    }
+  }
+
+  async reconcileSupervisors(currentProfile?: UserProfile): Promise<{ reconciled: number; errors: string[] }> {
+    if (this.hasReconciledSupervisors || !hasFirebase || !db) return { reconciled: 0, errors: [] };
+    const isAdmin = currentProfile?.perfil === "Desenvolvedor/Admin" || currentProfile?.perfil === "Administrador";
+    if (!isAdmin) return { reconciled: 0, errors: [] };
+
+    this.hasReconciledSupervisors = true;
+    let reconciled = 0;
+    const errors: string[] = [];
+
+    try {
+      const usersSnap = await getDocs(collection(db, "users"));
+      const existingUsers = usersSnap.docs.map(d => normalizeUserProfile(d.data(), d.id));
+
+      const supSnap = await getDocs(collection(db, "supervisors"));
+      const existingSups = supSnap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as Supervisor));
+
+      for (const u of existingUsers) {
+        if (!u.id || !u.nome) continue;
+        const emailLower = (u.email || "").trim().toLowerCase();
+
+        // Check if supervisor doc exists by ID or email
+        const matchingSupByEmail = emailLower ? existingSups.find(s => s.email && s.email.trim().toLowerCase() === emailLower) : undefined;
+
+        const supPayload = {
+          id: u.id,
+          nome: u.nome.trim(),
+          email: emailLower,
+          cargo: (u.cargo || u.perfil || "Supervisor").trim(),
+          perfil: u.perfil || "supervisor",
+          ativo: Boolean(u.ativo),
+          participaFarolGemba: u.participaFarolGemba !== false,
+          gruposContratoPermitidos: u.gruposContratoPermitidos || ["vale", "vli"],
+          updatedAt: serverTimestamp()
+        };
+
+        try {
+          await setDoc(doc(db, "supervisors", u.id), supPayload, { merge: true });
+          reconciled++;
+
+          // If there was an old duplicate document with a different ID and the same email, remove duplicate
+          if (matchingSupByEmail && matchingSupByEmail.id !== u.id && matchingSupByEmail.id.startsWith("sup_")) {
+            await deleteDoc(doc(db, "supervisors", matchingSupByEmail.id)).catch(() => undefined);
+          }
+        } catch (err: any) {
+          console.warn(`Erro ao reconciliar supervisor para ${u.email}:`, err);
+          errors.push(`Erro para ${u.email}: ${err?.message || err}`);
+        }
+      }
+    } catch (err: any) {
+      console.error("Erro na rotina de reconciliação de supervisores:", err);
+      errors.push(`Erro geral: ${err?.message || err}`);
+    }
+
+    return { reconciled, errors };
   }
 
   stopSync(clearData: boolean = false): void {
     this.unsubscribers.forEach(u => u());
     this.unsubscribers = [];
     this.syncActive = false;
+    this.hasReconciledSupervisors = false;
     if (clearData) {
       this.inspections = [];
       this.supervisors = [];
@@ -399,6 +614,16 @@ class DBService {
       this.notifications = [];
       this.authorizedEmails = [];
       this.metadataPreloaded = false;
+      this.readiness = {
+        configReady: false,
+        deletedNamesReady: false,
+        notificationsReady: false,
+        supervisorsReady: false,
+        areasReady: false,
+        contractsReady: false,
+        inspectionsReady: false,
+        usersReady: false
+      };
     }
   }
 
@@ -455,7 +680,7 @@ class DBService {
       
       let filteredList = list;
       if (f.tipo && f.tipo !== "all" && f.tipo !== "") {
-        filteredList = list.filter(item => getTipoLancamento(item.atividade, item.tipo) === f.tipo);
+        filteredList = list.filter(item => getTipoLancamento(item.atividade, item.tipo, item.tipoLancamento) === f.tipo);
       }
       if (f.searchTerm) {
         const term = f.searchTerm.toLowerCase();
@@ -500,7 +725,7 @@ class DBService {
         list = list.filter(item => item.data === f.data);
       }
       if (f.tipo && f.tipo !== "all" && f.tipo !== "") {
-        list = list.filter(item => getTipoLancamento(item.atividade, item.tipo) === f.tipo);
+        list = list.filter(item => getTipoLancamento(item.atividade, item.tipo, item.tipoLancamento) === f.tipo);
       }
       if (f.searchTerm) {
         const term = f.searchTerm.toLowerCase();
@@ -626,8 +851,16 @@ class DBService {
   async saveInspection(inspection: Inspection): Promise<void> {
     this.assertFirebase();
     const isNew = !this.inspections.some(i => i.id === inspection.id);
+    const grupoContrato = inspection.grupoContrato || getInspectionGrupoContrato(
+      inspection,
+      this.areas,
+      this.contracts,
+      this.supervisors,
+      this.deletedNames
+    );
     const payload: any = {
       ...inspection,
+      grupoContrato,
       fotosAntes: inspection.fotosAntes || [],
       fotosDepois: inspection.fotosDepois || [],
       createdAt: inspection.createdAt || new Date().toISOString(),
@@ -690,6 +923,20 @@ class DBService {
     const duplicate = this.users.find(u => u.id !== user.id && normalize(u.email) === emailKey);
     if (duplicate) throw new Error("Este e-mail já está cadastrado.");
     await setDoc(doc(db, "users", user.id), { ...user, email: emailKey, updatedAt: serverTimestamp() }, { merge: true });
+
+    // Sync operational supervisors directory
+    const supPayload = {
+      id: user.id,
+      nome: user.nome.trim(),
+      email: emailKey,
+      cargo: (user.cargo || user.perfil || "Supervisor").trim(),
+      perfil: user.perfil,
+      ativo: Boolean(user.ativo),
+      participaFarolGemba: user.participaFarolGemba !== false,
+      gruposContratoPermitidos: user.gruposContratoPermitidos || ["vale", "vli"],
+      updatedAt: serverTimestamp()
+    };
+    await setDoc(doc(db, "supervisors", user.id), supPayload, { merge: true });
   }
 
   async updateUser(id: string, data: {
@@ -699,11 +946,16 @@ class DBService {
     perfil: string;
     ativo: boolean;
     participaFarolGemba: boolean;
+    gruposContratoPermitidos?: GrupoContrato[];
   }): Promise<void> {
     this.assertFirebase();
     const emailKey = normalize(data.email);
     const duplicate = this.users.find(u => u.id !== id && normalize(u.email) === emailKey);
     if (duplicate) throw new Error("Este e-mail já está cadastrado.");
+
+    const gruposPermitidos = data.gruposContratoPermitidos && data.gruposContratoPermitidos.length > 0
+      ? data.gruposContratoPermitidos
+      : ["vale", "vli"];
 
     // Strict canonical payload - no uppercase fields, only documented canonical fields
     const payload = {
@@ -713,13 +965,178 @@ class DBService {
       perfil: data.perfil,
       ativo: Boolean(data.ativo),
       participaFarolGemba: Boolean(data.participaFarolGemba),
+      gruposContratoPermitidos: gruposPermitidos,
       updatedAt: serverTimestamp()
     };
 
     await setDoc(doc(db, "users", id), payload, { merge: true });
+
+    // Sync operational supervisors directory with merge
+    const supPayload = {
+      id,
+      nome: data.nome.trim(),
+      email: emailKey,
+      cargo: (data.cargo.trim() || data.perfil || "Supervisor").trim(),
+      perfil: data.perfil,
+      ativo: Boolean(data.ativo),
+      participaFarolGemba: Boolean(data.participaFarolGemba),
+      gruposContratoPermitidos: gruposPermitidos,
+      updatedAt: serverTimestamp()
+    };
+    await setDoc(doc(db, "supervisors", id), supPayload, { merge: true });
   }
 
-  async deleteUser(id: string) { this.assertFirebase(); await deleteDoc(doc(db, "users", id)); }
+  /**
+   * Rotina administrativa de prévia da reconciliação de inspeções legadas.
+   * Não altera nenhuma inspeção; analisa e retorna as previsões de classificação.
+   */
+  async previewLegacyInspectionsReconciliation(): Promise<LegacyReconciliationPreview> {
+    this.assertFirebase();
+    let allInsps: Inspection[] = [];
+    try {
+      const snap = await getDocs(query(collection(db, "inspections"), limit(3000)));
+      allInsps = snap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as Inspection));
+    } catch {
+      allInsps = this.inspections;
+    }
+
+    const items: LegacyReconciliationItem[] = [];
+    let semGrupoContrato = 0;
+    let paraVale = 0;
+    let paraVli = 0;
+    let naoClassificados = 0;
+
+    for (const insp of allInsps) {
+      const currentGrupo = insp.grupoContrato;
+      const isMissing = !currentGrupo || (currentGrupo !== "vale" && currentGrupo !== "vli");
+
+      if (isMissing) {
+        semGrupoContrato++;
+
+        const supervisor = this.supervisors.find(s => s.id === insp.supervisorId);
+        const area = this.areas.find(a => a.id === insp.areaId);
+        const contract = this.contracts.find(c => c.id === insp.contratoId);
+
+        const areaName = (area?.nome || this.deletedNames[insp.areaId || ""] || insp.areaId || "").toLowerCase();
+        const contractCombined = ((contract?.codigo || "") + " " + (contract?.nome || "") + " " + (this.deletedNames[insp.contratoId || ""] || "") + " " + (insp.contratoId || "")).toLowerCase();
+        const supName = (supervisor?.nome || "").toLowerCase();
+        const allText = `${areaName} ${contractCombined} ${supName} ${insp.observacoes || ""}`.trim();
+
+        let grupoSugerido: "vale" | "vli" | "nao_classificado" = "nao_classificado";
+        let motivo = "";
+
+        if (
+          areaName.includes("andaime vale") ||
+          areaName.includes("sucateamento vale") ||
+          contractCombined.includes("andaime vale") ||
+          contractCombined.includes("sucateamento vale") ||
+          allText.includes("andaime vale") ||
+          allText.includes("sucateamento vale")
+        ) {
+          grupoSugerido = "vale";
+          motivo = 'Classificado como Vale (Andaime Vale / Sucateamento Vale)';
+          paraVale++;
+        } else if (
+          areaName.includes("vale") ||
+          contractCombined.includes("vale")
+        ) {
+          grupoSugerido = "vale";
+          motivo = 'Classificado como Vale (Localidade/Contrato Vale)';
+          paraVale++;
+        } else if (
+          areaName.includes("vli") ||
+          areaName.includes("fca") ||
+          contractCombined.includes("vli") ||
+          contractCombined.includes("fca") ||
+          (supervisor && isSupervisorFromGrupoContrato(supervisor, "vli")) ||
+          (area && area.nome) ||
+          (contract && (contract.codigo || contract.nome))
+        ) {
+          grupoSugerido = "vli";
+          motivo = 'Classificado como VLI (Localidade/Contrato operacional)';
+          paraVli++;
+        } else if (!allText || allText.length < 2) {
+          grupoSugerido = "nao_classificado";
+          motivo = 'Registro sem localidade, contrato ou supervisor identificável';
+          naoClassificados++;
+        } else {
+          grupoSugerido = "vli";
+          motivo = 'Classificado como VLI (Localidade operacional padrão)';
+          paraVli++;
+        }
+
+        items.push({
+          id: insp.id,
+          data: insp.data,
+          supervisorNome: supervisor?.nome || insp.supervisorId || "Não informado",
+          localidade: area?.nome || insp.areaId || "Não informada",
+          contrato: contract?.nome || contract?.codigo || insp.contratoId || "Não informado",
+          grupoAtual: currentGrupo || "Sem grupo",
+          grupoSugerido,
+          motivo
+        });
+      }
+    }
+
+    return {
+      totalAnalisadas: allInsps.length,
+      semGrupoContrato,
+      paraVale,
+      paraVli,
+      naoClassificados,
+      items
+    };
+  }
+
+  /**
+   * Executa a reconciliação das inspeções legadas em lote no Firestore.
+   * Apenas atualiza o campo grupoContrato; não apaga nem duplica registros.
+   */
+  async executeLegacyInspectionsReconciliation(items: LegacyReconciliationItem[]): Promise<{ updatedCount: number; errors: string[] }> {
+    this.assertFirebase();
+    const toUpdate = items.filter(item => item.grupoSugerido === "vale" || item.grupoSugerido === "vli");
+    let updatedCount = 0;
+    const errors: string[] = [];
+
+    const CHUNK_SIZE = 400;
+    for (let i = 0; i < toUpdate.length; i += CHUNK_SIZE) {
+      const chunk = toUpdate.slice(i, i + CHUNK_SIZE);
+      const batch = writeBatch(db);
+
+      for (const item of chunk) {
+        const ref = doc(db, "inspections", item.id);
+        batch.set(ref, {
+          grupoContrato: item.grupoSugerido,
+          updatedAt: serverTimestamp()
+        }, { merge: true });
+      }
+
+      try {
+        await batch.commit();
+        updatedCount += chunk.length;
+      } catch (err: any) {
+        console.error("Erro ao aplicar lote de reconciliação:", err);
+        errors.push(`Erro no lote ${Math.floor(i / CHUNK_SIZE) + 1}: ${err?.message || err}`);
+      }
+    }
+
+    // Update local cache
+    for (const item of toUpdate) {
+      const existing = this.inspections.find(i => i.id === item.id);
+      if (existing) {
+        existing.grupoContrato = item.grupoSugerido as "vale" | "vli";
+      }
+    }
+    this.emit("inspections");
+
+    return { updatedCount, errors };
+  }
+
+  async deleteUser(id: string) {
+    this.assertFirebase();
+    await deleteDoc(doc(db, "users", id));
+    await deleteDoc(doc(db, "supervisors", id)).catch(() => undefined);
+  }
 
   async saveDeletedName(id: string, name: string) { this.assertFirebase(); await setDoc(doc(db, "deleted_names", id), { name }, { merge: true }); }
 
@@ -879,6 +1296,11 @@ class DBService {
       // Check special 13 users
       const special13 = NOVOS_13_USUARIOS_PADRAO.find(u => u.email.toLowerCase() === normalized.email.toLowerCase());
       if (special13) {
+        const specialIsLeader = normalize(special13.cargo).includes("lider de equipe");
+        if (specialIsLeader && normalized.perfil !== "Líder de Equipe") {
+          changes.push('perfil: "Líder de Equipe"');
+          normalized.perfil = "Líder de Equipe";
+        }
         if (normalized.participaFarolGemba !== false) {
           changes.push("Definir participaFarolGemba: false (Regra Liderança/Segurança)");
           normalized.participaFarolGemba = false;
@@ -967,6 +1389,11 @@ class DBService {
       // Special 13 users check
       const special13 = NOVOS_13_USUARIOS_PADRAO.find(u => u.email.toLowerCase() === normalized.email.toLowerCase());
       if (special13) {
+        const specialIsLeader = normalize(special13.cargo).includes("lider de equipe");
+        if (specialIsLeader && normalized.perfil !== "Líder de Equipe") {
+          changes.push('perfil: "Líder de Equipe"');
+          normalized.perfil = "Líder de Equipe";
+        }
         if (normalized.participaFarolGemba !== false) {
           normalized.participaFarolGemba = false;
           changes.push("participaFarolGemba: false");
@@ -1052,8 +1479,9 @@ class DBService {
 
       if (existing) {
         try {
+          const isLeader = normalize(item.cargo).includes("lider de equipe");
           await updateDoc(doc(db, "users", existing.id), {
-            perfil: "supervisor",
+            perfil: isLeader ? "Líder de Equipe" : "supervisor",
             cargo: existing.cargo || item.cargo,
             ativo: true,
             primeiroAcesso: existing.primeiroAcesso ?? true,
@@ -1072,7 +1500,7 @@ class DBService {
           await setDoc(doc(db, "authorized_emails", authEmailId), {
             id: authEmailId,
             email: emailLower,
-            perfilPadrao: "Supervisor",
+            perfilPadrao: normalize(item.cargo).includes("lider de equipe") ? "Líder de Equipe" : "Supervisor",
             ativo: true,
             updatedAt: serverTimestamp()
           }, { merge: true });

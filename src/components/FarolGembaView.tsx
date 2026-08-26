@@ -1,23 +1,27 @@
 import React, { useState, useMemo } from "react";
-import { CalendarDays, Radio, Trophy, Filter, HelpCircle } from "lucide-react";
-import { Area, Inspection, Supervisor, isDialInspection, isDesvioComportamentalInspection } from "../types";
+import { CalendarDays, Radio, Trophy, Filter, HelpCircle, Building2, CheckCircle2 } from "lucide-react";
+import { Area, Contract, GrupoContrato, GrupoContratoFiltro, Inspection, Supervisor, isDialInspection, isDesvioComportamentalInspection } from "../types";
 import { getUniqueMonthlyInspections, getEffectiveMonthKey, getMonthOptions } from "../utils/inspectionUtils";
-import { calculateInspectionScore, getSupervisorMetaMensal } from "../utils/scoring";
+import { calculateInspectionScore } from "../utils/scoring";
 import {
+  deveParticiparFarolGemba,
   isFarolVli,
+  isSupervisorFromGrupoContrato,
   normalizeName,
-  FAROL_VLI_NAMES
+  getSupervisorMetaMensal,
+  getInspectionGrupoContrato,
+  isGestorRole
 } from "../utils/operational";
 import { getTipoLancamento } from "../types";
 
-const normalizarTipo = (valor = '') =>
+const normalizarTipo = (valor = "") =>
   String(valor)
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
     .trim()
     .toLowerCase()
-    .replace(/[_-]+/g, ' ')
-    .replace(/\s+/g, ' ');
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ");
 
 const isPresencaEmCampo = (inspecao: Inspection) => {
   const insp = inspecao as any;
@@ -26,10 +30,10 @@ const isPresencaEmCampo = (inspecao: Inspection) => {
     insp.tipo ??
     insp.atividade ??
     insp.categoria ??
-    ''
+    ""
   );
 
-  return tipo === 'presenca em campo';
+  return tipo === "presenca em campo";
 };
 
 interface FarolGembaViewProps {
@@ -40,19 +44,46 @@ interface FarolGembaViewProps {
   isDashboardFiltered?: boolean;
   selectedMonth?: string;
   onSelectMonth?: (month: string) => void;
+  grupoContrato?: GrupoContratoFiltro;
+  onSelectGrupoContrato?: (grupo: GrupoContratoFiltro) => void;
+  permittedGruposContrato?: GrupoContrato[];
+  contracts?: Contract[];
+}
+
+interface SupervisorRowData {
+  supervisor: Supervisor;
+  role: string;
+  contractGroup: "Vale" | "VLI";
+  metaMensal: number;
+  lvcc: number;
+  dial: number;
+  dss: number;
+  presencaEmCampo: number;
+  estrutural: number;
+  comportamental: number;
+  notificacao: number;
+  interdicao: number;
+  totalInspecoes: number;
+  percentual: number;
+  pontuacao: number;
+  lastTimestamp: number;
 }
 
 export default function FarolGembaView({
   inspections,
   supervisors,
+  areas,
   selectedSupervisorId = "all",
   isDashboardFiltered = false,
   selectedMonth: propSelectedMonth,
-  onSelectMonth
+  onSelectMonth,
+  grupoContrato = "todos",
+  onSelectGrupoContrato,
+  permittedGruposContrato = ["vale", "vli"],
+  contracts = []
 }: FarolGembaViewProps) {
   const [localMonth, setLocalMonth] = useState<string>("auto");
   const activeMonth = propSelectedMonth !== undefined ? propSelectedMonth : localMonth;
-  const effectiveMonth = getEffectiveMonthKey(activeMonth);
 
   const handleMonthChange = (val: string) => {
     if (onSelectMonth) {
@@ -75,93 +106,46 @@ export default function FarolGembaView({
   };
 
   const getSupervisorRole = (sup: Supervisor) => {
-    const isVli = isFarolVli(sup) || sup.unidade === "VLI" || (sup.nome && (
-      sup.nome.toLowerCase().includes("vli") ||
-      FAROL_VLI_NAMES.some(n => normalizeName(sup.nome) === normalizeName(n))
-    ));
+    const isVli = isSupervisorFromGrupoContrato(sup, "vli");
     
-    const isGestor = sup.tipoMeta === "gestor" || (sup.nome && (
-      sup.nome.toLowerCase().includes("gestor") ||
-      sup.nome.toLowerCase().includes("gerente")
-    ));
+    const isGestor = sup.tipoMeta === "gestor" || isGestorRole(sup.cargo, sup.perfil);
 
     if (isGestor) return "Gestor";
     if (isVli) return "Supervisor VLI";
     return "Supervisor Vale";
   };
 
-  const isJhonata = (sup?: Supervisor) => {
-    if (!sup) return false;
-    const email = String(sup.email || "").trim().toLowerCase();
-    const nome = String(sup.nome || "").toLowerCase();
-    const id = String(sup.id || "").toLowerCase();
-    return (
-      email === "j.santos@grupofta.com.br" ||
-      email === "jhonata.santos@grupofta.com.br" ||
-      email.startsWith("jhonata") ||
-      id.includes("j_santos") ||
-      id.includes("jhonata") ||
-      (nome.includes("jhonata") && (nome.includes("santos") || nome.includes("gonçalves") || nome.includes("goncalves")))
-    );
-  };
-
-  const getMetaMensal = (sup: Supervisor) => {
-    if (isJhonata(sup)) return 8;
-    if (sup.metaMensal !== undefined) return sup.metaMensal;
-    const role = getSupervisorRole(sup);
-    if (role === "Supervisor VLI") return 28;
-    return 16; // Supervisor Vale & Gestor
-  };
-
-  const rows = useMemo(() => {
-    const monthInspections = getUniqueMonthlyInspections(inspections, activeMonth);
-
-    const activeSupervisors = supervisors.filter(
-      (sup) => sup.ativo !== false && sup.participaFarolGemba !== false && isFarolVli(sup)
-    );
-    const displayedSupervisors = selectedSupervisorId && selectedSupervisorId !== "all"
-      ? activeSupervisors.filter((s) => s.id === selectedSupervisorId)
-      : activeSupervisors;
-
-    return displayedSupervisors
+  // Process rows for a specific supervisor list and monthly inspections
+  const processSupervisorRows = (supList: Supervisor[], monthInspections: Inspection[]): SupervisorRowData[] => {
+    return supList
       .map((sup) => {
-        // Find inspections owned by this supervisor
         const ownInsps = monthInspections.filter((i) => i.supervisorId === sup.id);
 
-        // Individual type counts
         const lvcc = ownInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "LVCC").length;
         const dial = ownInsps.filter(isDialInspection).length;
         const dss = ownInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "DSS").length;
         const estrutural = ownInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Desvio Estrutural").length;
-        const directPresenca = ownInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Presença em Campo").length;
         const comportamental = ownInsps.filter(isDesvioComportamentalInspection).length;
         const notificacao = ownInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Notificação").length;
         const interdicao = ownInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Interdição").length;
-
-        // Presenca em campo column only counts actual "Presença em Campo" inspections
         const presencaEmCampo = ownInsps.filter(isPresencaEmCampo).length;
 
-        // Total registered inspections
         const totalInspecoes = ownInsps.length;
-
-        // Meta Mensal
         const metaMensal = getSupervisorMetaMensal(sup);
-
-        // Percentual calculation
         const percentual = metaMensal > 0 ? (totalInspecoes / metaMensal) * 100 : 0;
-
-        // Pontuacao calculation using central function
         const pontuacao = calculateInspectionScore(ownInsps);
 
-        // Last timestamp for sorting tie-breaker
         const lastTimestamp = ownInsps.reduce((latest, i) => {
           const timestamp = i.createdAt ? new Date(i.createdAt).getTime() : new Date(`${i.data}T00:00:00`).getTime();
           return Math.max(latest, timestamp);
         }, 0);
 
+        const isVli = isSupervisorFromGrupoContrato(sup, "vli");
+
         return {
           supervisor: sup,
           role: getSupervisorRole(sup),
+          contractGroup: (isVli ? "VLI" : "Vale") as "VLI" | "Vale",
           metaMensal,
           lvcc,
           dial,
@@ -178,20 +162,177 @@ export default function FarolGembaView({
         };
       })
       .sort((a, b) => {
-        // Sorting criteria:
-        // 1. Higher pontuacao
-        // 2. Higher percentual
-        // 3. Higher total inspections
-        // 4. Most recent inspection
         if (b.pontuacao !== a.pontuacao) return b.pontuacao - a.pontuacao;
         if (b.percentual !== a.percentual) return b.percentual - a.percentual;
         if (b.totalInspecoes !== a.totalInspecoes) return b.totalInspecoes - a.totalInspecoes;
         return b.lastTimestamp - a.lastTimestamp;
       });
-  }, [inspections, supervisors, activeMonth, selectedSupervisorId]);
+  };
+
+  const monthInspections = useMemo(() => {
+    return getUniqueMonthlyInspections(inspections, activeMonth);
+  }, [inspections, activeMonth]);
+
+  // Contract isolation must happen before any Farol calculation. This prevents
+  // a supervisor linked to both groups from having Vale and VLI results mixed.
+  const valeMonthInspections = useMemo(() => (
+    monthInspections.filter((inspection) =>
+      getInspectionGrupoContrato(inspection, areas, contracts, supervisors) === "vale"
+    )
+  ), [monthInspections, areas, contracts, supervisors]);
+
+  const vliMonthInspections = useMemo(() => (
+    monthInspections.filter((inspection) =>
+      getInspectionGrupoContrato(inspection, areas, contracts, supervisors) === "vli"
+    )
+  ), [monthInspections, areas, contracts, supervisors]);
+
+  // Filter supervisors who participate in Farol GEMBA
+  const eligibleSupervisors = useMemo(() => {
+    return supervisors.filter(
+      (sup) => sup.ativo !== false && deveParticiparFarolGemba(sup)
+    );
+  }, [supervisors]);
+
+  // Vale supervisors
+  const valeRows = useMemo(() => {
+    const list = eligibleSupervisors.filter((s) => isSupervisorFromGrupoContrato(s, "vale"));
+    const filteredList = selectedSupervisorId && selectedSupervisorId !== "all"
+      ? list.filter((s) => s.id === selectedSupervisorId)
+      : list;
+    return processSupervisorRows(filteredList, valeMonthInspections);
+  }, [eligibleSupervisors, valeMonthInspections, selectedSupervisorId]);
+
+  // VLI supervisors
+  const vliRows = useMemo(() => {
+    const list = eligibleSupervisors.filter((s) => isSupervisorFromGrupoContrato(s, "vli"));
+    const filteredList = selectedSupervisorId && selectedSupervisorId !== "all"
+      ? list.filter((s) => s.id === selectedSupervisorId)
+      : list;
+    return processSupervisorRows(filteredList, vliMonthInspections);
+  }, [eligibleSupervisors, vliMonthInspections, selectedSupervisorId]);
+
+  const renderTable = (rows: SupervisorRowData[], title: string, metaDescription: string, badgeColor: string) => {
+    return (
+      <div className="space-y-2">
+        <div className="flex items-center justify-between px-1">
+          <div className="flex items-center gap-2">
+            <span className={`w-2.5 h-2.5 rounded-full ${badgeColor}`}></span>
+            <h4 className="text-xs font-black uppercase tracking-wider text-[#0B2E59]">{title}</h4>
+            <span className="text-[10px] text-gray-400 font-bold">({metaDescription})</span>
+          </div>
+          <span className="text-[10px] font-bold text-slate-500 bg-slate-100 px-2 py-0.5 rounded-md">
+            {rows.length} {rows.length === 1 ? "supervisor" : "supervisores"}
+          </span>
+        </div>
+
+        <div className="w-full overflow-x-auto rounded-xl border border-gray-100 shadow-xs bg-white">
+          <table className="w-full min-w-[950px] text-left border-collapse bg-white">
+            <thead>
+              <tr className="bg-[#0B2E59] text-white text-[10px] font-extrabold uppercase tracking-wider">
+                <th className="py-3 px-4">Supervisor/Gestor</th>
+                <th className="py-3 px-3 text-center">Meta Mensal</th>
+                <th className="py-3 px-3 text-center">LVCC</th>
+                <th className="py-3 px-3 text-center">DIAL</th>
+                <th className="py-3 px-3 text-center">DSS</th>
+                <th className="py-3 px-3 text-center">Presença em Campo</th>
+                <th className="py-3 px-3 text-center">Desvio Estrutural</th>
+                <th className="py-3 px-3 text-center">Desvio Comportamental</th>
+                <th className="py-3 px-3 text-center">Notificação</th>
+                <th className="py-3 px-3 text-center">Interdição</th>
+                <th className="py-3 px-3 text-center bg-blue-950">Total de Inspeções</th>
+                <th className="py-3 px-3 text-center">Percentual</th>
+                <th className="py-3 px-4 text-center">Pontuação</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100 text-xs">
+              {rows.map((row, index) => {
+                const hasMetGoal = row.totalInspecoes >= row.metaMensal;
+                return (
+                  <tr key={row.supervisor.id} className="hover:bg-slate-50 transition-colors">
+                    {/* Supervisor Name & Role Badge */}
+                    <td className="py-3 px-4 font-extrabold text-[#0B2E59]">
+                      <div className="flex items-center gap-2">
+                        {index === 0 && row.totalInspecoes > 0 && (
+                          <Trophy size={14} className="text-amber-500 shrink-0" />
+                        )}
+                        <div className="flex flex-col">
+                          <span>{row.supervisor.nome}</span>
+                          <span className={`text-[8px] font-black uppercase tracking-wider w-max mt-0.5 px-1.5 py-0.5 rounded ${
+                            row.role === "Supervisor VLI"
+                              ? "bg-orange-50 text-[#F58220] border border-orange-100"
+                              : row.role === "Gestor"
+                              ? "bg-blue-50 text-[#0B2E59] border border-blue-100"
+                              : "bg-emerald-50 text-emerald-700 border border-emerald-100"
+                          }`}>
+                            {row.role}
+                          </span>
+                        </div>
+                      </div>
+                    </td>
+                    
+                    {/* Meta Mensal */}
+                    <td className="py-3 px-3 text-center font-black text-slate-500">{row.metaMensal}</td>
+                    
+                    {/* LVCC */}
+                    <td className="py-3 px-3 text-center font-bold text-slate-600">{row.lvcc}</td>
+                    
+                    {/* DIAL */}
+                    <td className="py-3 px-3 text-center font-bold text-slate-600">{row.dial}</td>
+                    
+                    {/* DSS */}
+                    <td className="py-3 px-3 text-center font-bold text-slate-600">{row.dss}</td>
+                    
+                    {/* Presença em Campo */}
+                    <td className="py-3 px-3 text-center font-bold text-slate-600 bg-purple-50/20">{row.presencaEmCampo}</td>
+                    
+                    {/* Desvio Estrutural */}
+                    <td className="py-3 px-3 text-center font-bold text-slate-600">{row.estrutural}</td>
+
+                    {/* Desvio Comportamental */}
+                    <td className="py-3 px-3 text-center font-bold text-slate-600">{row.comportamental}</td>
+
+                    {/* Notificação */}
+                    <td className="py-3 px-3 text-center font-bold text-slate-600">{row.notificacao}</td>
+
+                    {/* Interdição */}
+                    <td className="py-3 px-3 text-center font-bold text-slate-600">{row.interdicao}</td>
+                    
+                    {/* Total de Inspeções */}
+                    <td className="py-3 px-3 text-center font-black text-[#0B2E59] bg-blue-50/30">{row.totalInspecoes}</td>
+                    
+                    {/* Percentual */}
+                    <td className="py-3 px-3 text-center font-black">
+                      <span className={hasMetGoal ? "text-emerald-600" : row.percentual >= 50 ? "text-[#F58220]" : "text-red-500"}>
+                        {Math.round(row.percentual)}%
+                      </span>
+                    </td>
+                    
+                    {/* Pontuação */}
+                    <td className="py-3 px-4 text-center font-black text-[#0B2E59] bg-orange-50/10">
+                      <span className="text-sm px-2.5 py-1 bg-[#0B2E59]/5 rounded-md text-[#0B2E59]">
+                        {row.pontuacao}
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
+              {rows.length === 0 && (
+                <tr>
+                  <td colSpan={13} className="py-8 text-center text-gray-400 font-bold">
+                    Nenhum supervisor ativo cadastrado para este contrato.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    );
+  };
 
   return (
-    <section className="space-y-4">
+    <section className="space-y-5">
       {/* Filters & Information Panel */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 rounded-xl border border-blue-100 bg-blue-50/60 px-4 py-3">
         <div className="flex flex-col sm:flex-row sm:items-center gap-3">
@@ -214,6 +355,51 @@ export default function FarolGembaView({
               ))}
             </select>
           </div>
+
+          {/* Contract group selector if handler is provided */}
+          {onSelectGrupoContrato && (
+            <div className="flex items-center gap-1 bg-white border border-gray-200 rounded-lg p-0.5 sm:ml-2">
+              {permittedGruposContrato.length > 1 && (
+                <button
+                  type="button"
+                  onClick={() => onSelectGrupoContrato("todos")}
+                  className={`px-2 py-1 text-[10px] font-extrabold uppercase rounded-md transition-colors ${
+                    grupoContrato === "todos"
+                      ? "bg-[#0B2E59] text-white"
+                      : "text-gray-600 hover:text-gray-900"
+                  }`}
+                >
+                  Todos os Contratos
+                </button>
+              )}
+              {permittedGruposContrato.includes("vale") && (
+                <button
+                  type="button"
+                  onClick={() => onSelectGrupoContrato("vale")}
+                  className={`px-2 py-1 text-[10px] font-extrabold uppercase rounded-md transition-colors ${
+                    grupoContrato === "vale"
+                      ? "bg-emerald-700 text-white"
+                      : "text-gray-600 hover:text-gray-900"
+                  }`}
+                >
+                  Vale
+                </button>
+              )}
+              {permittedGruposContrato.includes("vli") && (
+                <button
+                  type="button"
+                  onClick={() => onSelectGrupoContrato("vli")}
+                  className={`px-2 py-1 text-[10px] font-extrabold uppercase rounded-md transition-colors ${
+                    grupoContrato === "vli"
+                      ? "bg-[#F58220] text-white"
+                      : "text-gray-600 hover:text-gray-900"
+                  }`}
+                >
+                  VLI
+                </button>
+              )}
+            </div>
+          )}
         </div>
         
         <div className="flex flex-col items-end gap-1.5">
@@ -228,108 +414,21 @@ export default function FarolGembaView({
         </div>
       </div>
 
-      {/* Main Farol Table */}
-      <div className="w-full overflow-x-auto rounded-xl border border-gray-100 shadow-sm bg-white">
-        <table className="w-full min-w-[950px] text-left border-collapse bg-white">
-          <thead>
-            <tr className="bg-[#0B2E59] text-white text-[10px] font-extrabold uppercase tracking-wider">
-              <th className="py-3.5 px-4">Supervisor/Gestor</th>
-              <th className="py-3.5 px-3 text-center">Meta Mensal</th>
-              <th className="py-3.5 px-3 text-center">LVCC</th>
-              <th className="py-3.5 px-3 text-center">DIAL</th>
-              <th className="py-3.5 px-3 text-center">DSS</th>
-              <th className="py-3.5 px-3 text-center">Presença em Campo</th>
-              <th className="py-3.5 px-3 text-center">Desvio Estrutural</th>
-              <th className="py-3.5 px-3 text-center">Desvio Comportamental</th>
-              <th className="py-3.5 px-3 text-center">Notificação</th>
-              <th className="py-3.5 px-3 text-center">Interdição</th>
-              <th className="py-3.5 px-3 text-center bg-blue-950">Total de Inspeções</th>
-              <th className="py-3.5 px-3 text-center">Percentual</th>
-              <th className="py-3.5 px-4 text-center">Pontuação</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-gray-100 text-xs">
-            {rows.map((row, index) => {
-              const hasMetGoal = row.totalInspecoes >= row.metaMensal;
-              return (
-                <tr key={row.supervisor.id} className="hover:bg-slate-50 transition-colors">
-                  {/* Supervisor Name & Role Badge */}
-                  <td className="py-3.5 px-4 font-extrabold text-[#0B2E59]">
-                    <div className="flex items-center gap-2">
-                      {index === 0 && row.totalInspecoes > 0 && (
-                        <Trophy size={14} className="text-amber-500 shrink-0" />
-                      )}
-                      <div className="flex flex-col">
-                        <span>{row.supervisor.nome}</span>
-                        <span className={`text-[8px] font-black uppercase tracking-wider w-max mt-0.5 px-1 py-0.5 rounded ${
-                          row.role === "Supervisor VLI"
-                            ? "bg-orange-50 text-[#F58220] border border-orange-100"
-                            : row.role === "Gestor"
-                            ? "bg-blue-50 text-[#0B2E59] border border-blue-100"
-                            : "bg-emerald-50 text-emerald-700 border border-emerald-100"
-                        }`}>
-                          {row.role}
-                        </span>
-                      </div>
-                    </div>
-                  </td>
-                  
-                  {/* Meta Mensal */}
-                  <td className="py-3.5 px-3 text-center font-black text-slate-500">{row.metaMensal}</td>
-                  
-                  {/* LVCC */}
-                  <td className="py-3.5 px-3 text-center font-bold text-slate-600">{row.lvcc}</td>
-                  
-                  {/* DIAL */}
-                  <td className="py-3.5 px-3 text-center font-bold text-slate-600">{row.dial}</td>
-                  
-                  {/* DSS */}
-                  <td className="py-3.5 px-3 text-center font-bold text-slate-600">{row.dss}</td>
-                  
-                  {/* Presença em Campo */}
-                  <td className="py-3.5 px-3 text-center font-bold text-slate-600 bg-purple-50/20">{row.presencaEmCampo}</td>
-                  
-                  {/* Desvio Estrutural */}
-                  <td className="py-3.5 px-3 text-center font-bold text-slate-600">{row.estrutural}</td>
+      {/* Render Tables based on selected contract group */}
+      {grupoContrato === "vale" && (
+        renderTable(valeRows, "Farol GEMBA Vale", "Meta Padrão: 16 inspeções/mês", "bg-emerald-500")
+      )}
 
-                  {/* Desvio Comportamental */}
-                  <td className="py-3.5 px-3 text-center font-bold text-slate-600">{row.comportamental}</td>
+      {grupoContrato === "vli" && (
+        renderTable(vliRows, "Farol GEMBA VLI", "Meta Padrão: 28 inspeções/mês", "bg-[#F58220]")
+      )}
 
-                  {/* Notificação */}
-                  <td className="py-3.5 px-3 text-center font-bold text-slate-600">{row.notificacao}</td>
-
-                  {/* Interdição */}
-                  <td className="py-3.5 px-3 text-center font-bold text-slate-600">{row.interdicao}</td>
-                  
-                  {/* Total de Inspeções */}
-                  <td className="py-3.5 px-3 text-center font-black text-[#0B2E59] bg-blue-50/30">{row.totalInspecoes}</td>
-                  
-                  {/* Percentual */}
-                  <td className="py-3.5 px-3 text-center font-black">
-                    <span className={hasMetGoal ? "text-emerald-600" : row.percentual >= 50 ? "text-[#F58220]" : "text-red-500"}>
-                      {Math.round(row.percentual)}%
-                    </span>
-                  </td>
-                  
-                  {/* Pontuação */}
-                  <td className="py-3.5 px-4 text-center font-black text-[#0B2E59] bg-orange-50/10">
-                    <span className="text-sm px-2.5 py-1 bg-[#0B2E59]/5 rounded-md text-[#0B2E59]">
-                      {row.pontuacao}
-                    </span>
-                  </td>
-                </tr>
-              );
-            })}
-            {rows.length === 0 && (
-              <tr>
-                <td colSpan={13} className="py-8 text-center text-gray-400 font-bold">
-                  Nenhum supervisor cadastrado ou ativo.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
+      {grupoContrato === "todos" && (
+        <div className="space-y-6">
+          {renderTable(valeRows, "Farol GEMBA Vale", "Meta Padrão: 16 inspeções/mês", "bg-emerald-500")}
+          {renderTable(vliRows, "Farol GEMBA VLI", "Meta Padrão: 28 inspeções/mês", "bg-[#F58220]")}
+        </div>
+      )}
 
       {/* Helper Footer */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 bg-slate-50 px-4 py-2.5 rounded-lg border border-slate-100 text-[10px] text-gray-400">
@@ -344,10 +443,14 @@ export default function FarolGembaView({
           <div className="absolute right-0 bottom-6 hidden group-hover:block bg-slate-900 text-white p-3 rounded-lg shadow-xl w-64 leading-relaxed font-normal normal-case text-left z-10">
             <strong>Cálculo dos Pontos:</strong>
             <ul className="list-disc pl-3.5 mt-1 space-y-1 text-[9px]">
-              <li>Cada inspeção registrada: 1 ponto</li>
-              <li>Cada Presença em Campo derivada de DIAL: +1 ponto</li>
-              <li>Cada Presença em Campo derivada de Desvio Estrutural: +1 ponto</li>
-              <li>Presença em Campo lançada diretamente: 1 ponto (já incluso nas inspeções)</li>
+              <li>Interdição: 4 pontos</li>
+              <li>Notificação: 3 pontos</li>
+              <li>LVCC: 2 pontos</li>
+              <li>DIAL: 2 pontos</li>
+              <li>Desvio Comportamental: 2 pontos</li>
+              <li>Desvio Estrutural: 2 pontos</li>
+              <li>DSS: 1 ponto</li>
+              <li>Presença em Campo: 1 ponto</li>
             </ul>
           </div>
         </div>

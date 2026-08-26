@@ -75,6 +75,14 @@ service cloud.firestore {
       return admin() || manager() || supervisor() || teamLeader();
     }
 
+    function allowedContractGroups() {
+      return profile().get('gruposContratoPermitidos', ['vale', 'vli']);
+    }
+
+    function canAccessContractGroup(grupo) {
+      return admin() || manager() || (grupo in allowedContractGroups());
+    }
+
     match /users/{uid} {
       allow get: if signedIn() && (
         request.auth.uid == uid ||
@@ -101,8 +109,13 @@ service cloud.firestore {
     }
 
     match /inspections/{id} {
-      allow read: if active();
+      allow read: if active() && (
+        admin() ||
+        manager() ||
+        canAccessContractGroup(resource.data.get('grupoContrato', 'vale'))
+      );
       allow create: if operational() && !visitor() &&
+        canAccessContractGroup(request.resource.data.get('grupoContrato', 'vale')) &&
         (
           !teamLeader() ||
           (request.resource.data.criadoPorUid == request.auth.uid)
@@ -110,6 +123,8 @@ service cloud.firestore {
         (!('fotosAntes' in request.resource.data) || request.resource.data.fotosAntes.size() <= 3) &&
         (!('fotosDepois' in request.resource.data) || request.resource.data.fotosDepois.size() <= 3);
       allow update: if operational() && !visitor() &&
+        canAccessContractGroup(resource.data.get('grupoContrato', 'vale')) &&
+        canAccessContractGroup(request.resource.data.get('grupoContrato', 'vale')) &&
         (
           admin() || manager() || supervisor() ||
           (teamLeader() && resource.data.criadoPorUid == request.auth.uid && request.resource.data.criadoPorUid == resource.data.criadoPorUid)

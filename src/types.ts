@@ -1,3 +1,6 @@
+export type GrupoContrato = "vale" | "vli";
+export type GrupoContratoFiltro = "todos" | "vale" | "vli";
+
 export enum Potential {
   CRITICO = "Crítico",
   GRAVE = "Grave",
@@ -25,6 +28,7 @@ export interface Inspection {
   supervisorId: string;
   areaId: string;
   contratoId: string;
+  grupoContrato?: GrupoContrato;
   atividade: string;
   tipo: string;
   tipoLancamento?: string;
@@ -50,6 +54,31 @@ export interface Inspection {
   updatedAt?: string;
 }
 
+export interface InspectionDraft {
+  id?: string;
+  data: string;
+  supervisorId: string;
+  areaId: string;
+  contratoId: string;
+  grupoContrato?: GrupoContrato;
+  tipoLancamento: string;
+  tipo?: string;
+  atividade?: string;
+  potencial: Potential;
+  descricao: string;
+  acaoCorretiva: string;
+  responsavel: string;
+  prazo: string;
+  status: InspectionStatus;
+  observacoes: string;
+  fotosAntes: string[];
+  fotosDepois: string[];
+  temaDSS: string;
+  quantidadeParticipantes: number | "" | null;
+  dataConclusao: string;
+  savedAt?: string;
+}
+
 export interface Supervisor {
   id: string;
   nome: string;
@@ -57,6 +86,8 @@ export interface Supervisor {
   unidade?: string;
   cargo?: string;
   perfil?: string;
+  grupoContrato?: GrupoContrato;
+  gruposContratoPermitidos?: GrupoContrato[];
   metaSemanal?: number;
   metaMensal?: number;
   tipoMeta?: string;
@@ -68,6 +99,7 @@ export interface Area {
   id: string;
   nome: string;
   codigo?: string;
+  grupoContrato?: GrupoContrato;
   ativa?: boolean;
   ativo?: boolean;
 }
@@ -76,6 +108,7 @@ export interface Contract {
   id: string;
   codigo: string;
   nome: string;
+  grupoContrato?: GrupoContrato;
   ativo?: boolean;
 }
 
@@ -98,6 +131,7 @@ export interface UserProfile {
   cargo?: string;
   ativo: boolean;
   participaFarolGemba?: boolean;
+  gruposContratoPermitidos?: GrupoContrato[];
   primeiroAcesso?: boolean;
   deveAlterarSenha?: boolean;
   ultimoLogin?: any;
@@ -241,3 +275,24 @@ export const TIPO_LANCAMENTO_CONFIG: Record<string, {
     borderClass: "border-teal-200"
   }
 };
+
+export interface LegacyReconciliationItem {
+  id: string;
+  data?: string;
+  supervisorNome?: string;
+  localidade?: string;
+  contrato?: string;
+  grupoAtual?: string;
+  grupoSugerido: "vale" | "vli" | "nao_classificado";
+  motivo: string;
+}
+
+export interface LegacyReconciliationPreview {
+  totalAnalisadas: number;
+  semGrupoContrato: number;
+  paraVale: number;
+  paraVli: number;
+  naoClassificados: number;
+  items: LegacyReconciliationItem[];
+}
+

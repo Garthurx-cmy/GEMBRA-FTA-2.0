@@ -15,7 +15,9 @@ import {
   getTipoLancamento,
   isDialInspection,
   isDesvioComportamentalInspection,
-  TIPO_LANCAMENTO_CONFIG
+  TIPO_LANCAMENTO_CONFIG,
+  GrupoContrato,
+  GrupoContratoFiltro
 } from "../types";
 import {
   getNormalizedInspectionDate,
@@ -44,11 +46,19 @@ import {
   AlertCircle,
   XCircle,
   ShieldAlert,
-  Calendar
+  Calendar,
+  Building2
 } from "lucide-react";
 import FarolGembaView from "./FarolGembaView";
 import ResolvedImage from "./ResolvedImage";
-import { getInspectionScore } from "../utils/operational";
+import {
+  getInspectionScore,
+  deveParticiparFarolGemba,
+  getInspectionGrupoContrato,
+  isSupervisorFromGrupoContrato,
+  getGrupoContratoPorLocalidade,
+  getSupervisorTargets
+} from "../utils/operational";
 import {
   getOperationalWeek,
   normalizeInspectionDate,
@@ -64,20 +74,7 @@ import {
   Tooltip as RechartsTooltip
 } from "recharts";
 
-const isJhonata = (sup?: Supervisor) => {
-  if (!sup) return false;
-  const email = String(sup.email || "").trim().toLowerCase();
-  const nome = String(sup.nome || "").toLowerCase();
-  const id = String(sup.id || "").toLowerCase();
-  return (
-    email === "j.santos@grupofta.com.br" ||
-    email === "jhonata.santos@grupofta.com.br" ||
-    email.startsWith("jhonata") ||
-    id.includes("j_santos") ||
-    id.includes("jhonata") ||
-    (nome.includes("jhonata") && (nome.includes("santos") || nome.includes("gonçalves") || nome.includes("goncalves")))
-  );
-};
+
 
 interface DashboardViewProps {
   inspections: Inspection[];
@@ -88,6 +85,9 @@ interface DashboardViewProps {
   onSelectMonth?: (month: string) => void;
   onEditInspection: (inspection: Inspection) => void;
   onSelectTab: (tab: string) => void;
+  grupoContrato?: GrupoContratoFiltro;
+  onSelectGrupoContrato?: (grupo: GrupoContratoFiltro) => void;
+  permittedGruposContrato?: GrupoContrato[];
 }
 
 export default function DashboardView({
@@ -98,7 +98,10 @@ export default function DashboardView({
   selectedMonth: propSelectedMonth,
   onSelectMonth,
   onEditInspection,
-  onSelectTab
+  onSelectTab,
+  grupoContrato = "todos",
+  onSelectGrupoContrato,
+  permittedGruposContrato = ["vale", "vli"]
 }: DashboardViewProps) {
   const [localMonth, setLocalMonth] = useState("auto");
   const activeMonth = propSelectedMonth !== undefined ? propSelectedMonth : localMonth;
@@ -232,7 +235,7 @@ export default function DashboardView({
       }
 
       // 4. Type filter
-      if (selectedTipo !== "all" && getTipoLancamento(item.atividade, item.tipo) !== selectedTipo) {
+      if (selectedTipo !== "all" && getTipoLancamento(item.atividade, item.tipo, item.tipoLancamento) !== selectedTipo) {
         return false;
       }
 
@@ -241,9 +244,40 @@ export default function DashboardView({
         return false;
       }
 
+      // 6. Contract Group filter (Vale vs VLI)
+      if (grupoContrato === "vale") {
+        const inspGrupo = getInspectionGrupoContrato(item, areas, contracts, supervisors, dbService.getDeletedNames());
+        if (inspGrupo !== "vale") return false;
+      } else if (grupoContrato === "vli") {
+        const inspGrupo = getInspectionGrupoContrato(item, areas, contracts, supervisors, dbService.getDeletedNames());
+        if (inspGrupo !== "vli") return false;
+      }
+
       return true;
     });
-  }, [inspections, timeframe, activeOperationalWeek, startDate, endDate, selectedSupervisorId, selectedAreaId, selectedTipo, selectedPotencial]);
+  }, [inspections, timeframe, activeOperationalWeek, startDate, endDate, selectedSupervisorId, selectedAreaId, selectedTipo, selectedPotencial, grupoContrato, areas, contracts, supervisors]);
+
+  // Available supervisors based on selected contract group
+  const availableSupervisors = useMemo(() => {
+    if (grupoContrato === "vale") {
+      return supervisors.filter((s) => isSupervisorFromGrupoContrato(s, "vale"));
+    }
+    if (grupoContrato === "vli") {
+      return supervisors.filter((s) => isSupervisorFromGrupoContrato(s, "vli"));
+    }
+    return supervisors;
+  }, [supervisors, grupoContrato]);
+
+  // Available areas based on selected contract group
+  const availableAreas = useMemo(() => {
+    if (grupoContrato === "vale") {
+      return areas.filter((a) => getGrupoContratoPorLocalidade(a.id, areas, contracts) === "vale");
+    }
+    if (grupoContrato === "vli") {
+      return areas.filter((a) => getGrupoContratoPorLocalidade(a.id, areas, contracts) === "vli");
+    }
+    return areas;
+  }, [areas, contracts, grupoContrato]);
 
   // --- CENTRALIZED WEEKLY INSPECTIONS FOR MULTIPLE COMPONENTS ---
   const weeklyInspections = useMemo(() => {
@@ -343,13 +377,16 @@ export default function DashboardView({
   const monthlyInspections = useMemo(() => {
     const baseList = getUniqueMonthlyInspections(inspections, dashboardMonthKey);
     return baseList.filter((insp) => {
+      const inspGrupo = getInspectionGrupoContrato(insp, areas, contracts, supervisors, dbService.getDeletedNames());
+      if (grupoContrato === "vale" && inspGrupo !== "vale") return false;
+      if (grupoContrato === "vli" && inspGrupo !== "vli") return false;
       if (selectedSupervisorId !== "all" && insp.supervisorId !== selectedSupervisorId) return false;
       if (selectedAreaId !== "all" && insp.areaId !== selectedAreaId) return false;
-      if (selectedTipo !== "all" && getTipoLancamento(insp.atividade, insp.tipo) !== selectedTipo) return false;
+      if (selectedTipo !== "all" && getTipoLancamento(insp.atividade, insp.tipo, insp.tipoLancamento) !== selectedTipo) return false;
       if (selectedPotencial !== "all" && insp.potencial !== selectedPotencial) return false;
       return true;
     });
-  }, [inspections, dashboardMonthKey, selectedSupervisorId, selectedAreaId, selectedTipo, selectedPotencial]);
+  }, [inspections, dashboardMonthKey, selectedSupervisorId, selectedAreaId, selectedTipo, selectedPotencial, grupoContrato, areas, contracts, supervisors]);
 
   const calendarDays = useMemo(() => {
     const year = currentCalendarMonth.getFullYear();
@@ -392,15 +429,15 @@ export default function DashboardView({
     const total = filteredInspections.length;
     const activeSups = new Set(filteredInspections.map((i) => i.supervisorId)).size;
 
-    const dss = filteredInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "DSS").length;
-    const ar = filteredInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "AR").length;
-    const lvcc = filteredInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "LVCC").length;
+    const dss = filteredInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "DSS").length;
+    const ar = filteredInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "AR").length;
+    const lvcc = filteredInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "LVCC").length;
     const dial = filteredInspections.filter(isDialInspection).length;
     const desviosComportamentais = filteredInspections.filter(isDesvioComportamentalInspection).length;
-    const desviosEstruturais = filteredInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "Desvio Estrutural").length;
-    const notificacoes = filteredInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "Notificação").length;
-    const interdicoes = filteredInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "Interdição").length;
-    const presenca = filteredInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "Presença em Campo").length;
+    const desviosEstruturais = filteredInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Desvio Estrutural").length;
+    const notificacoes = filteredInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Notificação").length;
+    const interdicoes = filteredInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Interdição").length;
+    const presenca = filteredInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Presença em Campo").length;
     const criticos = filteredInspections.filter((i) => i.potencial === Potential.CRITICO).length;
 
     // Supervisor Destaque da Semana math (Most inspections in this current filtered list)
@@ -453,20 +490,19 @@ export default function DashboardView({
     const endOfMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0);
     endOfMonth.setHours(23, 59, 59, 999);
 
-    const activeSups = supervisors.filter(s => s.ativo);
+    const activeSups = supervisors.filter((s) => {
+      if (!s.ativo) return false;
+      if (grupoContrato === "vale") return isSupervisorFromGrupoContrato(s, "vale");
+      if (grupoContrato === "vli") return isSupervisorFromGrupoContrato(s, "vli");
+      return true;
+    });
+    const activeSupsForGoals = activeSups.filter(s => deveParticiparFarolGemba(s));
     const selectedSupervisor = activeSups.find(s => s.id === selectedSupervisorId);
-    const typeBasedSupervisors = activeSups.filter(s => s.tipoMeta !== "quantitativa");
     const targetPerType = 7;
-    const weeklyGoal = (sup?: Supervisor) => {
-      if (isJhonata(sup)) return sup?.metaSemanal ?? 2;
-      return sup?.metaSemanal ?? 7;
-    };
-    const monthlyGoal = (sup?: Supervisor) => {
-      if (isJhonata(sup)) return sup?.metaMensal ?? 8;
-      return sup?.metaMensal ?? 28;
-    };
+    const weeklyGoal = (sup?: Supervisor) => sup ? getSupervisorTargets(sup).weekly : 4;
+    const monthlyGoal = (sup?: Supervisor) => sup ? getSupervisorTargets(sup).monthly : 16;
     const totalWeeklyTarget = selectedSupervisorId === "all"
-      ? Math.max(activeSups.reduce((sum, sup) => sum + weeklyGoal(sup), 0), 1)
+      ? Math.max(activeSupsForGoals.reduce((sum, sup) => sum + weeklyGoal(sup), 0), 1)
       : weeklyGoal(selectedSupervisor);
     const isQuantitativeGoal = selectedSupervisorId !== "all" && selectedSupervisor?.tipoMeta === "quantitativa";
 
@@ -476,14 +512,14 @@ export default function DashboardView({
     const monthInspections = monthlyInspections;
 
     // Counts for each of the types for this week
-    const dssCount = weekInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "DSS").length;
-    const arCount = weekInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "AR").length;
-    const lvccCount = weekInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "LVCC").length;
+    const dssCount = weekInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "DSS").length;
+    const arCount = weekInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "AR").length;
+    const lvccCount = weekInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "LVCC").length;
     const dialCount = weekInspections.filter(isDialInspection).length;
     const comportamentalCount = weekInspections.filter(isDesvioComportamentalInspection).length;
-    const estruturalCount = weekInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "Desvio Estrutural").length;
-    const notificacaoCount = weekInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "Notificação").length;
-    const interdicaoCount = weekInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "Interdição").length;
+    const estruturalCount = weekInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Desvio Estrutural").length;
+    const notificacaoCount = weekInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Notificação").length;
+    const interdicaoCount = weekInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Interdição").length;
 
     // A Type is achieved for the week if its count reaches targetPerType
     const dssAchieved = dssCount >= targetPerType;
@@ -507,13 +543,13 @@ export default function DashboardView({
 
     const typeBasedWeeklyAchieved = dssCapped + arCapped + lvccCapped + dialCapped + comportamentalCapped + estruturalCapped + notificacaoCapped + interdicaoCapped;
     const totalWeeklyAchieved = selectedSupervisorId === "all"
-      ? activeSups.reduce((sum, sup) => {
+      ? activeSupsForGoals.reduce((sum, sup) => {
           const count = weekInspections.filter(i => i.supervisorId === sup.id).length;
           if (sup.tipoMeta === "quantitativa") return sum + Math.min(count, weeklyGoal(sup));
           const achievedTypes = new Set(
             weekInspections
               .filter(i => i.supervisorId === sup.id)
-              .map(i => getTipoLancamento(i.atividade, i.tipo))
+              .map(i => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento))
               .filter(type => type !== "Presença em Campo")
           ).size;
           return sum + Math.min(achievedTypes, weeklyGoal(sup));
@@ -526,7 +562,7 @@ export default function DashboardView({
     // Monthly progress
     const monthlyTotalCount = monthInspections.length;
     const monthlyTarget = selectedSupervisorId === "all"
-      ? Math.max(activeSups.reduce((sum, sup) => sum + monthlyGoal(sup), 0), 1)
+      ? Math.max(activeSupsForGoals.reduce((sum, sup) => sum + monthlyGoal(sup), 0), 1)
       : monthlyGoal(selectedSupervisor);
     const monthlyPercentage = monthlyTarget > 0 ? Math.round((monthlyTotalCount / monthlyTarget) * 100) : 0;
 
@@ -572,7 +608,7 @@ export default function DashboardView({
         });
       }
 
-      const openInterdicao = unresolved.some((i) => getTipoLancamento(i.atividade, i.tipo) === "Interdição");
+      const openInterdicao = unresolved.some((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Interdição");
       if (openInterdicao) {
         smartAlertsList.push({
           text: `${sup.nome} possui Interdição com tratativa pendente.`,
@@ -597,7 +633,7 @@ export default function DashboardView({
         });
       }
 
-      const openNotificacao = unresolved.some((i) => getTipoLancamento(i.atividade, i.tipo) === "Notificação");
+      const openNotificacao = unresolved.some((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Notificação");
       if (openNotificacao) {
         smartAlertsList.push({
           text: `${sup.nome} possui Notificação pendente.`,
@@ -608,14 +644,14 @@ export default function DashboardView({
       // Pendente weekly targets
       const supWeekInsps = weeklyInspections.filter((i) => i.supervisorId === sup.id);
 
-      const supDss = supWeekInsps.some((i) => getTipoLancamento(i.atividade, i.tipo) === "DSS");
-      const supAr = supWeekInsps.some((i) => getTipoLancamento(i.atividade, i.tipo) === "AR");
-      const supLvcc = supWeekInsps.some((i) => getTipoLancamento(i.atividade, i.tipo) === "LVCC");
+      const supDss = supWeekInsps.some((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "DSS");
+      const supAr = supWeekInsps.some((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "AR");
+      const supLvcc = supWeekInsps.some((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "LVCC");
       const supDial = supWeekInsps.some(isDialInspection);
       const supComportamental = supWeekInsps.some(isDesvioComportamentalInspection);
-      const supEstrutural = supWeekInsps.some((i) => getTipoLancamento(i.atividade, i.tipo) === "Desvio Estrutural");
-      const supNotificacao = supWeekInsps.some((i) => getTipoLancamento(i.atividade, i.tipo) === "Notificação");
-      const supInterdicao = supWeekInsps.some((i) => getTipoLancamento(i.atividade, i.tipo) === "Interdição");
+      const supEstrutural = supWeekInsps.some((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Desvio Estrutural");
+      const supNotificacao = supWeekInsps.some((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Notificação");
+      const supInterdicao = supWeekInsps.some((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Interdição");
 
       if (sup.tipoMeta === "quantitativa") {
         const goal = weeklyGoal(sup);
@@ -693,7 +729,52 @@ export default function DashboardView({
       monthlyPercentage,
       smartAlerts: smartAlertsList
     };
-  }, [weeklyInspections, filteredInspections, selectedSupervisorId, supervisors]);
+  }, [weeklyInspections, monthlyInspections, filteredInspections, selectedSupervisorId, supervisors, grupoContrato]);
+
+
+  const contractGoalSummaries = useMemo(() => {
+    const build = (group: GrupoContrato) => {
+      const groupSupervisors = supervisors.filter(
+        (sup) => sup.ativo && deveParticiparFarolGemba(sup) && isSupervisorFromGrupoContrato(sup, group)
+      );
+      const groupWeek = weeklyInspections.filter(
+        (insp) => getInspectionGrupoContrato(insp, areas, contracts, supervisors, dbService.getDeletedNames()) === group
+      );
+      const groupMonth = monthlyInspections.filter(
+        (insp) => getInspectionGrupoContrato(insp, areas, contracts, supervisors, dbService.getDeletedNames()) === group
+      );
+
+      const weeklyTarget = Math.max(
+        groupSupervisors.reduce((sum, sup) => sum + getSupervisorTargets(sup).weekly, 0),
+        1
+      );
+      const monthlyTarget = Math.max(
+        groupSupervisors.reduce((sum, sup) => sum + getSupervisorTargets(sup).monthly, 0),
+        1
+      );
+      const weeklyDone = groupSupervisors.reduce((sum, sup) => {
+        const own = groupWeek.filter((insp) => insp.supervisorId === sup.id);
+        const goal = getSupervisorTargets(sup).weekly;
+        if (sup.tipoMeta === "quantitativa") return sum + Math.min(own.length, goal);
+        const uniqueTypes = new Set(
+          own.map((insp) => getTipoLancamento(insp.atividade, insp.tipo, insp.tipoLancamento))
+            .filter((type) => type !== "Presença em Campo")
+        ).size;
+        return sum + Math.min(uniqueTypes, goal);
+      }, 0);
+
+      return {
+        weeklyDone,
+        weeklyTarget,
+        weeklyPercentage: Math.min(100, Math.round((weeklyDone / weeklyTarget) * 100)),
+        monthlyDone: groupMonth.length,
+        monthlyTarget,
+        monthlyPercentage: Math.min(100, Math.round((groupMonth.length / monthlyTarget) * 100))
+      };
+    };
+
+    return { vale: build("vale"), vli: build("vli") };
+  }, [weeklyInspections, monthlyInspections, supervisors, areas, contracts]);
 
   // --- NEW MEMOS FOR ADVANCED CARDS ---
   const topSupervisorsOfWeek = useMemo(() => {
@@ -712,14 +793,14 @@ export default function DashboardView({
         const supWeekInsps = weeklyInspections.filter((i) => i.supervisorId === sup.id);
 
         // Count unique types achieved
-        const dssCount = supWeekInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "DSS").length;
-        const arCount = supWeekInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "AR").length;
-        const lvccCount = supWeekInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "LVCC").length;
+        const dssCount = supWeekInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "DSS").length;
+        const arCount = supWeekInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "AR").length;
+        const lvccCount = supWeekInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "LVCC").length;
         const dialCount = supWeekInsps.filter(isDialInspection).length;
         const comportamentalCount = supWeekInsps.filter(isDesvioComportamentalInspection).length;
-        const estruturalCount = supWeekInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "Desvio Estrutural").length;
-        const notificacaoCount = supWeekInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "Notificação").length;
-        const interdicaoCount = supWeekInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "Interdição").length;
+        const estruturalCount = supWeekInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Desvio Estrutural").length;
+        const notificacaoCount = supWeekInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Notificação").length;
+        const interdicaoCount = supWeekInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Interdição").length;
 
         const typeBasedAchievedCount = 
           (dssCount >= 1 ? 1 : 0) + 
@@ -732,7 +813,7 @@ export default function DashboardView({
           (interdicaoCount >= 1 ? 1 : 0);
 
         // Weekly target
-        const weeklyTarget = isJhonata(sup) ? (sup.metaSemanal ?? 2) : (sup.metaSemanal ?? (sup.unidade === "VLI" ? 7 : 4));
+        const weeklyTarget = getSupervisorTargets(sup).weekly;
         const weeklyAchievedCount = sup.tipoMeta === "quantitativa"
           ? Math.min(supWeekInsps.length, weeklyTarget)
           : Math.min(typeBasedAchievedCount, weeklyTarget);
@@ -775,13 +856,13 @@ export default function DashboardView({
   const pendingOperationalCounts = useMemo(() => {
     const unresolved = filteredInspections.filter((i) => i.status !== InspectionStatus.CONCLUIDO);
 
-    const ar = unresolved.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "AR").length;
-    const lvcc = unresolved.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "LVCC").length;
+    const ar = unresolved.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "AR").length;
+    const lvcc = unresolved.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "LVCC").length;
     const dial = unresolved.filter(isDialInspection).length;
     const comportamental = unresolved.filter(isDesvioComportamentalInspection).length;
-    const estrutural = unresolved.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "Desvio Estrutural").length;
-    const notificacao = unresolved.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "Notificação").length;
-    const interdicao = unresolved.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "Interdição").length;
+    const estrutural = unresolved.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Desvio Estrutural").length;
+    const notificacao = unresolved.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Notificação").length;
+    const interdicao = unresolved.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Interdição").length;
 
     return { ar, lvcc, dial, comportamental, estrutural, notificacao, interdicao };
   }, [filteredInspections]);
@@ -916,7 +997,7 @@ export default function DashboardView({
     };
 
     filteredInspections.forEach((i) => {
-      const type = getTipoLancamento(i.atividade, i.tipo);
+      const type = getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento);
       if (counts[type] !== undefined) {
         counts[type]++;
       }
@@ -1054,11 +1135,61 @@ export default function DashboardView({
 
       {/* FILTER PANEL */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-5">
-        <div className="flex items-center gap-2 mb-4 border-b border-gray-50 pb-3">
-          <Filter size={16} className="text-[#0B2E59]" />
-          <h2 className="text-sm font-bold text-[#0B2E59] uppercase tracking-wider">
-            Filtros Dinâmicos de Consulta
-          </h2>
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4 border-b border-gray-50 pb-3">
+          <div className="flex items-center gap-2">
+            <Filter size={16} className="text-[#0B2E59]" />
+            <h2 className="text-sm font-bold text-[#0B2E59] uppercase tracking-wider">
+              Filtros Dinâmicos de Consulta
+            </h2>
+          </div>
+
+          {/* Contract Group Selector (Vale vs VLI) */}
+          {onSelectGrupoContrato && (
+            <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 p-1 rounded-xl">
+              <span className="text-[10px] font-extrabold uppercase tracking-wider text-slate-500 px-2 flex items-center gap-1">
+                <Building2 size={12} /> Contrato:
+              </span>
+              {permittedGruposContrato.length > 1 && (
+                <button
+                  type="button"
+                  onClick={() => onSelectGrupoContrato("todos")}
+                  className={`px-3 py-1 text-xs font-black uppercase rounded-lg transition-all cursor-pointer ${
+                    grupoContrato === "todos"
+                      ? "bg-[#0B2E59] text-white shadow-xs"
+                      : "text-slate-600 hover:text-slate-900 hover:bg-slate-200/60"
+                  }`}
+                >
+                  Todos os Contratos
+                </button>
+              )}
+              {permittedGruposContrato.includes("vale") && (
+                <button
+                  type="button"
+                  onClick={() => onSelectGrupoContrato("vale")}
+                  className={`px-3 py-1 text-xs font-black uppercase rounded-lg transition-all cursor-pointer ${
+                    grupoContrato === "vale"
+                      ? "bg-emerald-700 text-white shadow-xs"
+                      : "text-slate-600 hover:text-slate-900 hover:bg-slate-200/60"
+                  }`}
+                >
+                  Vale
+                </button>
+              )}
+              {permittedGruposContrato.includes("vli") && (
+                <button
+                  type="button"
+                  onClick={() => onSelectGrupoContrato("vli")}
+                  className={`px-3 py-1 text-xs font-black uppercase rounded-lg transition-all cursor-pointer ${
+                    grupoContrato === "vli"
+                      ? "bg-[#F58220] text-white shadow-xs"
+                      : "text-slate-600 hover:text-slate-900 hover:bg-slate-200/60"
+                  }`}
+                >
+                  VLI
+                </button>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
@@ -1103,7 +1234,7 @@ export default function DashboardView({
               className="w-full text-xs bg-gray-50 border border-gray-200 rounded-lg p-2.5 text-gray-700 focus:outline-none focus:ring-1 focus:ring-[#0B2E59] transition-colors"
             >
               <option value="all">Todos os Supervisores</option>
-              {supervisors.map((s) => (
+              {availableSupervisors.map((s) => (
                 <option key={s.id} value={s.id}>
                   {s.nome}
                 </option>
@@ -1120,7 +1251,7 @@ export default function DashboardView({
               className="w-full text-xs bg-gray-50 border border-gray-200 rounded-lg p-2.5 text-gray-700 focus:outline-none focus:ring-1 focus:ring-[#0B2E59] transition-colors"
             >
               <option value="all">Todas as Áreas</option>
-              {areas.map((a) => (
+              {availableAreas.map((a) => (
                 <option key={a.id} value={a.id}>
                   {a.nome}
                 </option>
@@ -1273,6 +1404,25 @@ export default function DashboardView({
               </span>
             </div>
             
+            {grupoContrato === "todos" ? (
+              <div className="space-y-4">
+                {(["vale", "vli"] as const).map((group) => {
+                  const summary = contractGoalSummaries[group];
+                  return (
+                    <div key={group} className="rounded-lg border border-slate-100 p-3 bg-slate-50/60">
+                      <div className="flex items-center justify-between text-xs mb-2">
+                        <span className="font-black uppercase text-[#0B2E59]">{group === "vale" ? "Vale" : "VLI"}</span>
+                        <span className="font-black text-gray-900">{summary.weeklyDone}/{summary.weeklyTarget} • {summary.weeklyPercentage}%</span>
+                      </div>
+                      <div className="w-full bg-slate-200 h-3 rounded-lg overflow-hidden">
+                        <div className="bg-[#F58220] h-full transition-all duration-500" style={{ width: `${summary.weeklyPercentage}%` }} />
+                      </div>
+                    </div>
+                  );
+                })}
+                <p className="text-[10px] text-slate-400 font-bold uppercase text-center">Metas calculadas separadamente por contrato</p>
+              </div>
+            ) : (
             <div className="space-y-4">
               <div className="flex justify-between items-center text-xs">
                 <span className="font-bold text-gray-500">Progresso Geral:</span>
@@ -1319,10 +1469,11 @@ export default function DashboardView({
                 )}
               </div>
             </div>
+            )}
           </div>
           
           <div className="mt-4 pt-2 border-t border-slate-50 text-[10px] text-gray-400 font-bold uppercase tracking-wider text-center">
-            Percentual de Conformidade: {targets.weeklyPercentage}%
+            {grupoContrato === "todos" ? "Metas Vale e VLI separadas" : `Percentual de Conformidade: ${targets.weeklyPercentage}%`}
           </div>
         </div>
 
@@ -1338,6 +1489,25 @@ export default function DashboardView({
               </span>
             </div>
 
+            {grupoContrato === "todos" ? (
+              <div className="space-y-4 py-4">
+                {(["vale", "vli"] as const).map((group) => {
+                  const summary = contractGoalSummaries[group];
+                  return (
+                    <div key={group} className="rounded-lg border border-slate-100 p-3 bg-slate-50/60">
+                      <div className="flex items-center justify-between text-xs mb-2">
+                        <span className="font-black uppercase text-[#0B2E59]">{group === "vale" ? "Vale" : "VLI"}</span>
+                        <span className="font-black text-gray-900">{summary.monthlyDone}/{summary.monthlyTarget} • {summary.monthlyPercentage}%</span>
+                      </div>
+                      <div className="w-full bg-slate-200 h-3 rounded-lg overflow-hidden">
+                        <div className="bg-[#F58220] h-full transition-all duration-500" style={{ width: `${summary.monthlyPercentage}%` }} />
+                      </div>
+                    </div>
+                  );
+                })}
+                <p className="text-[10px] text-slate-400 font-bold uppercase text-center">Totais mensais não são somados entre contratos</p>
+              </div>
+            ) : (
             <div className="flex flex-col items-center justify-center py-4">
               {/* Circular Gauge */}
               <div className="relative w-44 h-44 flex items-center justify-center">
@@ -1375,10 +1545,11 @@ export default function DashboardView({
                 </p>
               </div>
             </div>
+            )}
           </div>
 
           <div className="pt-2 border-t border-slate-50 text-[10px] text-gray-400 font-bold uppercase tracking-wider text-center">
-            {targets.monthlyTotalCount >= targets.monthlyTarget ? "🎉 Meta Mensal Atingida!" : "🚀 Lançamentos ativos na base"}
+            {grupoContrato === "todos" ? "Metas mensais Vale e VLI separadas" : (targets.monthlyTotalCount >= targets.monthlyTarget ? "🎉 Meta Mensal Atingida!" : "🚀 Lançamentos ativos na base")}
           </div>
         </div>
 
@@ -1585,7 +1756,7 @@ export default function DashboardView({
               {last10Inspections.map((i) => {
                 const timeStr = i.createdAt ? new Date(i.createdAt).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" }) : "12:00";
                 const supShortName = supervisors.find(s => s.id === i.supervisorId)?.nome.split(" ")[0] || dbService.getDeletedNames()[i.supervisorId]?.split(" ")[0] || "Outros";
-                const typeStr = getTipoLancamento(i.atividade, i.tipo);
+                const typeStr = getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento);
                 const contractStr = contracts.find(c => c.id === i.contratoId)?.nome || "Geral";
 
                 return (
@@ -2252,13 +2423,13 @@ export default function DashboardView({
                       {hasInspections && (
                         <div className="flex gap-0.5 justify-center mt-auto">
                           {dayInspections.slice(0, 3).map((insp, i) => {
-                            const conf = TIPO_LANCAMENTO_CONFIG[getTipoLancamento(insp.atividade, insp.tipo)];
+                            const conf = TIPO_LANCAMENTO_CONFIG[getTipoLancamento(insp.atividade, insp.tipo, insp.tipoLancamento)];
                             return (
                               <span
                                 key={i}
                                 className="w-1.5 h-1.5 rounded-full"
                                 style={{ backgroundColor: conf?.color || "#f97316" }}
-                                title={getTipoLancamento(insp.atividade, insp.tipo)}
+                                title={getTipoLancamento(insp.atividade, insp.tipo, insp.tipoLancamento)}
                               />
                             );
                           })}
@@ -2304,7 +2475,7 @@ export default function DashboardView({
                 const sup = supervisors.find((s) => s.id === insp.supervisorId)?.nome || dbService.getDeletedNames()[insp.supervisorId] || "Desconhecido";
                 const area = areas.find((a) => a.id === insp.areaId)?.nome || dbService.getDeletedNames()[insp.areaId] || "Desconhecido";
                 const contract = contracts.find((c) => c.id === insp.contratoId) || (dbService.getDeletedNames()[insp.contratoId] ? { id: insp.contratoId, codigo: dbService.getDeletedNames()[insp.contratoId], nome: dbService.getDeletedNames()[insp.contratoId], ativo: false } : undefined);
-                const typeName = getTipoLancamento(insp.atividade, insp.tipo);
+                const typeName = getTipoLancamento(insp.atividade, insp.tipo, insp.tipoLancamento);
                 const typeConf = TIPO_LANCAMENTO_CONFIG[typeName];
 
                 return (
@@ -2437,7 +2608,8 @@ export default function DashboardView({
         <div className="flex items-center justify-between border-b border-gray-50 pb-4 mb-4">
           <div>
             <h3 className="text-sm font-bold text-[#0B2E59] uppercase tracking-wider flex items-center gap-1.5">
-              <CheckCircle size={16} className="text-[#F58220]" /> Farol GEMBA VLI
+              <CheckCircle size={16} className="text-[#F58220]" />
+              {grupoContrato === "vale" ? "Farol GEMBA Vale" : grupoContrato === "vli" ? "Farol GEMBA VLI" : "Farol GEMBA (Vale & VLI)"}
             </h3>
             <p className="text-[11px] text-gray-400 mt-0.5">
               Painel operacional integrado por supervisor e indicadores automáticos de conformidade.
@@ -2456,6 +2628,10 @@ export default function DashboardView({
           isDashboardFiltered={isDashboardFiltered}
           selectedMonth={activeMonth}
           onSelectMonth={handleMonthChange}
+          grupoContrato={grupoContrato}
+          onSelectGrupoContrato={onSelectGrupoContrato}
+          permittedGruposContrato={permittedGruposContrato}
+          contracts={contracts}
         />
       </div>
     </div>

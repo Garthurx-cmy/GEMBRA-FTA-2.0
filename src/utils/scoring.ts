@@ -1,5 +1,4 @@
-import { Inspection, Supervisor } from "../types";
-import { isFarolVli, FAROL_VLI_NAMES, normalizeName } from "./operational";
+import { Inspection } from "../types";
 import { getTipoLancamento } from "../types";
 
 export interface ScoringRule {
@@ -51,32 +50,4 @@ export function getSingleInspectionScore(insp: Inspection): number {
 export function calculateInspectionScore(inspections: Inspection[]): number {
   if (!inspections || !Array.isArray(inspections)) return 0;
   return inspections.reduce((sum, insp) => sum + getSingleInspectionScore(insp), 0);
-}
-
-export function isJhonataSupervisor(sup?: Supervisor): boolean {
-  if (!sup) return false;
-  const email = String(sup.email || "").trim().toLowerCase();
-  const nome = String(sup.nome || "").toLowerCase();
-  const id = String(sup.id || "").toLowerCase();
-  return (
-    email === "j.santos@grupofta.com.br" ||
-    email === "jhonata.santos@grupofta.com.br" ||
-    email.startsWith("jhonata") ||
-    id.includes("j_santos") ||
-    id.includes("jhonata") ||
-    (nome.includes("jhonata") && (nome.includes("santos") || nome.includes("gonçalves") || nome.includes("goncalves")))
-  );
-}
-
-export function getSupervisorMetaMensal(sup: Supervisor): number {
-  if (isJhonataSupervisor(sup)) return 8;
-  if (sup.metaMensal !== undefined) return sup.metaMensal;
-
-  const isVli = isFarolVli(sup) || sup.unidade === "VLI" || (sup.nome && (
-    sup.nome.toLowerCase().includes("vli") ||
-    FAROL_VLI_NAMES.some(n => normalizeName(sup.nome) === normalizeName(n))
-  ));
-
-  if (isVli) return 28;
-  return 16;
 }

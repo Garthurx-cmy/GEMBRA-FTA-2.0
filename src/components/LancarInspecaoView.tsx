@@ -16,8 +16,10 @@ import {
   SystemConfig,
   UserProfile,
   getTipoLancamento,
-  TIPO_LANCAMENTO_CONFIG
+  TIPO_LANCAMENTO_CONFIG,
+  GrupoContrato
 } from "../types";
+import { getGrupoContratoPorLocalidade } from "../utils/operational";
 import {
   Save,
   Camera,
@@ -28,9 +30,16 @@ import {
   CheckCircle,
   ArrowLeft,
   X,
-  UploadCloud
+  UploadCloud,
+  History,
+  Trash2
 } from "lucide-react";
 import { convertHeicFileToJpegDataUrl } from "../utils/heicHelper";
+import {
+  saveInspectionDraft,
+  getInspectionDraft,
+  deleteInspectionDraft
+} from "../utils/draftStorage";
 
 
 interface LancarInspecaoViewProps {
@@ -140,9 +149,13 @@ export default function LancarInspecaoView({
   const [error, setError] = useState("");
   const [isSaving, setIsSaving] = useState(false);
   const [compressingStatus, setCompressingStatus] = useState("");
+  const [draftRestored, setDraftRestored] = useState(false);
+  const [lastSavedDraftTime, setLastSavedDraftTime] = useState<string | null>(null);
 
-  // Load editing inspection data if provided
+  // Load editing inspection data if provided, or restore draft for new inspection
   useEffect(() => {
+    let isCancelled = false;
+
     if (editingInspection) {
       const initialTipo = editingInspection.tipoLancamento || getTipoLancamento(editingInspection.atividade, editingInspection.tipo, editingInspection.tipoLancamento);
       setData(editingInspection.data || "");
@@ -164,44 +177,132 @@ export default function LancarInspecaoView({
       setQuantidadeParticipantes(editingInspection.quantidadeParticipantes ?? "");
       setDataConclusao(editingInspection.dataConclusao || "");
     } else {
-      // Set defaults for new inspection
-      setData(new Date().toISOString().split("T")[0]);
-      
-      // If user is a Supervisor or Team Leader, auto-select their own profile and use currentUser.id
-      let initialSupId = "";
-      if (currentUser) {
-        const isOp = isOperationalRole(currentUser.perfil);
-        const matchedSup = supervisors.find(
-          (s) => s.id === currentUser.id || (s.email && currentUser.email && s.email.trim().toLowerCase() === currentUser.email.trim().toLowerCase())
-        );
-        if (matchedSup) {
-          initialSupId = matchedSup.id;
-        } else if (isOp) {
-          initialSupId = currentUser.id;
+      // Check for saved local draft first
+      const userId = currentUser?.id || "anon";
+      getInspectionDraft(userId).then((draft) => {
+        if (isCancelled) return;
+        if (draft && (draft.descricao || draft.temaDSS || draft.acaoCorretiva || draft.fotosAntes?.length || draft.observacoes)) {
+          setData(draft.data || new Date().toISOString().split("T")[0]);
+          setSupervisorId(draft.supervisorId || "");
+          setAreaId(draft.areaId || areas[0]?.id || "");
+          setContratoId(draft.contratoId || contracts[0]?.id || "");
+          const restoredTipo = draft.tipoLancamento || draft.tipo || draft.atividade || "DSS";
+          setAtividade(restoredTipo);
+          setTipo(restoredTipo);
+          setPotencial((draft.potencial as Potential) || Potential.LEVE);
+          setDescricao(draft.descricao || "");
+          setAcaoCorretiva(draft.acaoCorretiva || "");
+          setResponsavel(draft.responsavel || "");
+          setPrazo(draft.prazo || new Date().toISOString().split("T")[0]);
+          setStatus((draft.status as InspectionStatus) || InspectionStatus.ABERTO);
+          setObservacoes(draft.observacoes || "");
+          setFotosAntes(draft.fotosAntes || []);
+          setFotosDepois(draft.fotosDepois || []);
+          setTemaDSS(draft.temaDSS || "");
+          setQuantidadeParticipantes(draft.quantidadeParticipantes ?? "");
+          setDataConclusao(draft.dataConclusao || "");
+          setDraftRestored(true);
+        } else {
+          // Set defaults for new inspection
+          setData(new Date().toISOString().split("T")[0]);
+          
+          let initialSupId = "";
+          if (currentUser) {
+            const isOp = isOperationalRole(currentUser.perfil);
+            const matchedSup = supervisors.find(
+              (s) => s.id === currentUser.id || (s.email && currentUser.email && s.email.trim().toLowerCase() === currentUser.email.trim().toLowerCase())
+            );
+            if (matchedSup) {
+              initialSupId = matchedSup.id;
+            } else if (isOp) {
+              initialSupId = currentUser.id;
+            }
+          }
+          setSupervisorId(initialSupId);
+          setAreaId(areas[0]?.id || "");
+          setContratoId(contracts[0]?.id || "");
+          setAtividade("DSS");
+          setTipo("DSS");
+          setPotencial(Potential.LEVE);
+          setDescricao("");
+          setAcaoCorretiva("");
+          setResponsavel("");
+          setPrazo(new Date().toISOString().split("T")[0]);
+          setStatus(InspectionStatus.ABERTO);
+          setObservacoes("");
+          setFotosAntes([]);
+          setFotosDepois([]);
+          setTemaDSS("");
+          setQuantidadeParticipantes("");
+          setDataConclusao("");
         }
-      }
-      setSupervisorId(initialSupId);
-      
-      setAreaId(areas[0]?.id || "");
-      setContratoId(contracts[0]?.id || "");
-      
-      setAtividade("DSS");
-      setTipo("DSS");
-      
-      setPotencial(Potential.LEVE);
-      setDescricao("");
-      setAcaoCorretiva("");
-      setResponsavel("");
-      setPrazo(new Date().toISOString().split("T")[0]);
-      setStatus(InspectionStatus.ABERTO);
-      setObservacoes("");
-      setFotosAntes([]);
-      setFotosDepois([]);
-      setTemaDSS("");
-      setQuantidadeParticipantes("");
-      setDataConclusao("");
+      });
     }
+
+    return () => {
+      isCancelled = true;
+    };
   }, [editingInspection, supervisors, areas, contracts, config, currentUser]);
+
+  // Auto-save draft on form change (debounced 1000ms)
+  useEffect(() => {
+    if (editingInspection) return; // Do not auto-save when editing existing records
+    const userId = currentUser?.id || "anon";
+    const hasContent = !!(descricao || acaoCorretiva || responsavel || temaDSS || fotosAntes.length > 0 || fotosDepois.length > 0 || observacoes);
+    if (!hasContent) return;
+
+    const timer = setTimeout(() => {
+      const grupoContrato = getGrupoContratoPorLocalidade(areaId, areas, contracts);
+      saveInspectionDraft(userId, {
+        data,
+        supervisorId,
+        areaId,
+        contratoId,
+        grupoContrato,
+        atividade,
+        tipo,
+        tipoLancamento: getSelectedValue(),
+        potencial,
+        descricao,
+        acaoCorretiva,
+        responsavel,
+        prazo,
+        status,
+        observacoes,
+        fotosAntes,
+        fotosDepois,
+        temaDSS,
+        quantidadeParticipantes: quantidadeParticipantes === "" ? undefined : Number(quantidadeParticipantes),
+        dataConclusao
+      }).then(() => {
+        const now = new Date();
+        setLastSavedDraftTime(`${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}:${String(now.getSeconds()).padStart(2, "0")}`);
+      });
+    }, 1000);
+
+    return () => clearTimeout(timer);
+  }, [
+    data, supervisorId, areaId, contratoId, atividade, tipo, potencial,
+    descricao, acaoCorretiva, responsavel, prazo, status, observacoes,
+    fotosAntes, fotosDepois, temaDSS, quantidadeParticipantes, dataConclusao,
+    editingInspection, currentUser?.id
+  ]);
+
+  const handleDiscardDraft = async () => {
+    const userId = currentUser?.id || "anon";
+    await deleteInspectionDraft(userId);
+    setDraftRestored(false);
+    setLastSavedDraftTime(null);
+    setDescricao("");
+    setAcaoCorretiva("");
+    setResponsavel("");
+    setObservacoes("");
+    setFotosAntes([]);
+    setFotosDepois([]);
+    setTemaDSS("");
+    setQuantidadeParticipantes("");
+    setDataConclusao("");
+  };
 
   // Resolve matching label for select element
   const getSelectedValue = () => {
@@ -340,6 +441,7 @@ export default function LancarInspecaoView({
       supervisorId,
       areaId,
       contratoId,
+      grupoContrato: getGrupoContratoPorLocalidade(areaId, areas, contracts),
       tipoLancamento: currentLaunchType,
       tipo: currentLaunchType,
       atividade: currentLaunchType,
@@ -376,6 +478,11 @@ export default function LancarInspecaoView({
     setIsSaving(true);
     try {
       await onSave(finalInspection);
+      if (!editingInspection) {
+        await deleteInspectionDraft(currentUser?.id || "anon");
+        setDraftRestored(false);
+        setLastSavedDraftTime(null);
+      }
     } catch (err: any) {
       console.error(err);
       setError(err?.message || "Erro ao salvar a inspeção no banco de dados.");
@@ -391,22 +498,52 @@ export default function LancarInspecaoView({
   return (
     <div className="space-y-6 max-w-4xl mx-auto animate-fade-in">
       {/* Header Back Block */}
-      <div className="flex items-center gap-3 border-b border-gray-100 pb-4">
-        <button
-          onClick={onCancel}
-          className="p-1.5 rounded-lg bg-gray-50 hover:bg-gray-100 text-gray-600 transition-colors cursor-pointer"
-        >
-          <ArrowLeft size={16} />
-        </button>
-        <div>
-          <h1 className="text-xl font-extrabold text-[#0B2E59]">
-            {editingInspection ? "Editar Registro de Inspeção" : "Lançar Nova Inspeção GEMBA"}
-          </h1>
-          <p className="text-xs text-gray-500 mt-0.5">
-            Preencha todos os dados abaixo para registrar auditorias e ocorrências de campo.
-          </p>
+      <div className="flex items-center justify-between gap-3 border-b border-gray-100 pb-4">
+        <div className="flex items-center gap-3">
+          <button
+            onClick={onCancel}
+            className="p-1.5 rounded-lg bg-gray-50 hover:bg-gray-100 text-gray-600 transition-colors cursor-pointer"
+          >
+            <ArrowLeft size={16} />
+          </button>
+          <div>
+            <h1 className="text-xl font-extrabold text-[#0B2E59]">
+              {editingInspection ? "Editar Registro de Inspeção" : "Lançar Nova Inspeção GEMBA"}
+            </h1>
+            <p className="text-xs text-gray-500 mt-0.5">
+              Preencha todos os dados abaixo para registrar auditorias e ocorrências de campo.
+            </p>
+          </div>
         </div>
+
+        {/* Auto-save status indicator */}
+        {!editingInspection && lastSavedDraftTime && (
+          <div className="flex items-center gap-1.5 text-[11px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-lg shadow-2xs">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+            Rascunho salvo às {lastSavedDraftTime}
+          </div>
+        )}
       </div>
+
+      {/* DRAFT RESTORED ALERT BANNER */}
+      {draftRestored && !editingInspection && (
+        <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-xl text-amber-900 text-xs font-semibold flex items-center justify-between gap-3 shadow-2xs">
+          <div className="flex items-center gap-2">
+            <History size={16} className="text-[#F58220] shrink-0" />
+            <div>
+              <span className="font-extrabold block">Rascunho recuperado automaticamente</span>
+              <span className="text-[11px] text-amber-700">Seus dados preenchidos anteriormente foram restaurados no formulário.</span>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleDiscardDraft}
+            className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-extrabold text-red-700 bg-white hover:bg-red-50 border border-red-200 rounded-lg transition-colors cursor-pointer shrink-0"
+          >
+            <Trash2 size={12} /> Descartar rascunho
+          </button>
+        </div>
+      )}
 
       {/* ERROR BOX */}
       {error && (

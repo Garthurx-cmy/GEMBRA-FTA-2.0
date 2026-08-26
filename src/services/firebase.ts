@@ -1,5 +1,10 @@
 import { initializeApp, getApps, getApp } from "firebase/app";
-import { getFirestore } from "firebase/firestore";
+import {
+  initializeFirestore,
+  persistentLocalCache,
+  persistentMultipleTabManager,
+  getFirestore
+} from "firebase/firestore";
 import { getAuth } from "firebase/auth";
 import { getStorage } from "firebase/storage";
 import firebaseConfig from "../../firebase-applet-config.json";
@@ -14,7 +19,21 @@ let storage: any = null;
 if (hasFirebase) {
   try {
     app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
-    db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+    try {
+      db = initializeFirestore(
+        app,
+        {
+          localCache: persistentLocalCache({
+            tabManager: persistentMultipleTabManager()
+          }),
+          experimentalForceLongPolling: true
+        },
+        firebaseConfig.firestoreDatabaseId
+      );
+    } catch (cacheErr) {
+      // Fallback if already initialized with different config or unsupported in environment
+      db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+    }
     auth = getAuth(app);
     storage = getStorage(app);
   } catch (error) {

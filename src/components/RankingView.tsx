@@ -13,7 +13,9 @@ import {
   ShieldAlert,
   Trophy,
   Users,
-  AlertCircle
+  AlertCircle,
+  Building2,
+  Sparkles
 } from "lucide-react";
 import {
   Inspection,
@@ -21,6 +23,10 @@ import {
   Potential,
   Supervisor,
   UserProfile,
+  Contract,
+  Area,
+  GrupoContrato,
+  GrupoContratoFiltro,
   getTipoLancamento,
   isDialInspection,
   isDesvioComportamentalInspection
@@ -31,34 +37,63 @@ import {
   getMonthOptions
 } from "../utils/inspectionUtils";
 import { SCORING_RULES, calculateInspectionScore } from "../utils/scoring";
-import { inspectionDate } from "../utils/operational";
+import {
+  inspectionDate,
+  getContractGroup,
+  ContractGroupFilter,
+  getInspectionGrupoContrato,
+  isSupervisorFromGrupoContrato
+} from "../utils/operational";
 import {
   getOperationalWeek,
   formatOperationalWeekLabel
 } from "../utils/operationalWeek";
 import { buildUnifiedSupervisors, resolveSupervisorName } from "../utils/supervisors";
+import { dbService } from "../services/db";
 
 interface RankingViewProps {
   inspections: Inspection[];
   supervisors: Supervisor[];
+  contracts?: Contract[];
+  areas?: Area[];
   users?: UserProfile[];
   currentUser?: UserProfile | null;
   selectedMonth?: string;
   onSelectMonth?: (month: string) => void;
+  grupoContrato?: GrupoContratoFiltro;
+  onSelectGrupoContrato?: (grupo: GrupoContratoFiltro) => void;
+  permittedGruposContrato?: GrupoContrato[];
 }
 
 export default function RankingView({
   inspections,
   supervisors,
+  contracts = [],
+  areas = [],
   users = [],
   currentUser,
   selectedMonth: propSelectedMonth,
-  onSelectMonth
+  onSelectMonth,
+  grupoContrato = "todos",
+  onSelectGrupoContrato,
+  permittedGruposContrato = ["vale", "vli"]
 }: RankingViewProps) {
   const { start, end } = getOperationalWeek(new Date());
 
   const [localMonth, setLocalMonth] = useState<string>("auto");
   const activeMonth = propSelectedMonth !== undefined ? propSelectedMonth : localMonth;
+
+  // Local contract filter if onSelectGrupoContrato is not used
+  const [localContractFilter, setLocalContractFilter] = useState<GrupoContratoFiltro>("todos");
+  const effectiveContract = onSelectGrupoContrato ? grupoContrato : localContractFilter;
+
+  const handleContractChange = (val: GrupoContratoFiltro) => {
+    if (onSelectGrupoContrato) {
+      onSelectGrupoContrato(val);
+    } else {
+      setLocalContractFilter(val);
+    }
+  };
 
   const handleMonthChange = (val: string) => {
     if (onSelectMonth) {
@@ -68,22 +103,44 @@ export default function RankingView({
     }
   };
 
-  // Compute monthly inspections
-  const monthlyInspections = useMemo(() => {
-    return getUniqueMonthlyInspections(inspections, activeMonth);
-  }, [inspections, activeMonth]);
+  const deletedNames = useMemo(() => dbService.getDeletedNames(), []);
 
   // Lista unificada de responsáveis operacionais (supervisores ativos + usuários ativos com perfil operacional)
-  // Sem filtro de participaFarolGemba e sem filtro de isFarolVli
   const unifiedList = useMemo(() => {
     return buildUnifiedSupervisors(supervisors, users, currentUser).filter(
       (s) => s.ativo !== false
     );
   }, [supervisors, users, currentUser]);
 
+  // Compute monthly inspections filtered by contract group
+  const monthlyInspections = useMemo(() => {
+    const rawMonthly = getUniqueMonthlyInspections(inspections, activeMonth);
+    if (effectiveContract === "todos") {
+      return rawMonthly;
+    }
+    return rawMonthly.filter((item) => {
+      const group = getInspectionGrupoContrato(item, areas, contracts, unifiedList, deletedNames);
+      return group === effectiveContract;
+    });
+  }, [inspections, activeMonth, effectiveContract, areas, contracts, unifiedList, deletedNames]);
+
+  // Supervisors eligible for ranking based on selected contract group
+  const filteredSupervisors = useMemo(() => {
+    if (effectiveContract === "todos") {
+      return unifiedList;
+    }
+    return unifiedList.filter((s) => {
+      // Direct supervisor affinity
+      if (isSupervisorFromGrupoContrato(s, effectiveContract)) return true;
+      // Or supervisor has recorded inspections in this contract
+      const hasInspectionsInGroup = monthlyInspections.some((i) => i.supervisorId === s.id);
+      return hasInspectionsInGroup;
+    });
+  }, [unifiedList, effectiveContract, monthlyInspections]);
+
   // Cálculo das métricas para cada pessoa no Ranking
   const rankingData = useMemo(() => {
-    return unifiedList
+    return filteredSupervisors
       .map((supervisor) => {
         // Filtrar inspeções pertencentes ao período selecionado e ao ID/UID do responsável
         const month = monthlyInspections.filter((item) => {
@@ -178,8 +235,16 @@ export default function RankingView({
       });
   }, [monthlyInspections, unifiedList]);
 
-  // Líder do Ranking Geral no Mês
+  // Líder do Ranking Geral no Mês / Contrato selecionado
   const monthLeader = rankingData[0];
+
+  const totalMonthlyInspectionsCount = useMemo(() => {
+    return monthlyInspections.length;
+  }, [monthlyInspections]);
+
+  const activePerformersCount = useMemo(() => {
+    return rankingData.filter((r) => r.total > 0).length;
+  }, [rankingData]);
 
   return (
     <div className="space-y-5 animate-fade-in" id="ranking-view-container">
@@ -188,7 +253,7 @@ export default function RankingView({
         <div>
           <h1 className="text-xl font-extrabold text-[#0B2E59]">Ranking Geral de Desempenho Operacional</h1>
           <p className="text-xs text-gray-500 mt-1">
-            Pontuação unificada de supervisores e líderes de equipe baseada nas vistorias e atividades realizadas no período.
+            Acompanhamento de pontuação e destaques mensais por grupo de contrato com sincronização em tempo real.
           </p>
         </div>
         <div className="rounded-xl bg-blue-50 border border-blue-100 px-4 py-2.5">
@@ -201,26 +266,88 @@ export default function RankingView({
         </div>
       </div>
 
-      {/* Barra de Filtro de Mês */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-50 border border-slate-100 rounded-xl p-3">
-        <div className="flex items-center gap-2">
-          <span className="text-xs font-bold text-gray-500 uppercase">Filtrar por Mês:</span>
-          <select
-            id="ranking-month-select"
-            value={activeMonth}
-            onChange={(e) => handleMonthChange(e.target.value)}
-            className="text-xs font-extrabold text-[#0B2E59] bg-white border border-gray-200 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-1 focus:ring-[#F58220] cursor-pointer"
-          >
-            {getMonthOptions(inspections).map((opt) => (
-              <option key={opt.value} value={opt.value}>
-                {opt.label}
-              </option>
-            ))}
-          </select>
+      {/* Barra de Filtro Duplo: Mês & Contrato */}
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 bg-slate-50 border border-slate-200/80 rounded-xl p-3.5 shadow-2xs">
+        {/* Controles de Filtros */}
+        <div className="flex flex-wrap items-center gap-4">
+          {/* Seletor de Mês */}
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-bold text-gray-600 uppercase">Mês:</span>
+            <select
+              id="ranking-month-select"
+              value={activeMonth}
+              onChange={(e) => handleMonthChange(e.target.value)}
+              className="text-xs font-extrabold text-[#0B2E59] bg-white border border-gray-200 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-1 focus:ring-[#F58220] cursor-pointer shadow-2xs"
+            >
+              {getMonthOptions(inspections).map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* Filtro de Contrato: Todos / Vale / VLI */}
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-bold text-gray-600 uppercase flex items-center gap-1">
+              <Building2 size={13} className="text-gray-400" /> Contrato:
+            </span>
+            <div className="inline-flex rounded-lg p-0.5 bg-slate-200/80 border border-slate-300/70" role="group">
+              {permittedGruposContrato.length > 1 && (
+                <button
+                  type="button"
+                  onClick={() => handleContractChange("todos")}
+                  className={`px-3 py-1 text-xs font-extrabold rounded-md transition-all cursor-pointer ${
+                    effectiveContract === "todos"
+                      ? "bg-[#0B2E59] text-white shadow-xs"
+                      : "text-slate-700 hover:text-slate-900 hover:bg-slate-100"
+                  }`}
+                >
+                  Todos
+                </button>
+              )}
+              {permittedGruposContrato.includes("vale") && (
+                <button
+                  type="button"
+                  onClick={() => handleContractChange("vale")}
+                  className={`px-3 py-1 text-xs font-extrabold rounded-md transition-all cursor-pointer ${
+                    effectiveContract === "vale"
+                      ? "bg-emerald-700 text-white shadow-xs"
+                      : "text-slate-700 hover:text-slate-900 hover:bg-slate-100"
+                  }`}
+                >
+                  Vale
+                </button>
+              )}
+              {permittedGruposContrato.includes("vli") && (
+                <button
+                  type="button"
+                  onClick={() => handleContractChange("vli")}
+                  className={`px-3 py-1 text-xs font-extrabold rounded-md transition-all cursor-pointer ${
+                    effectiveContract === "vli"
+                      ? "bg-[#F58220] text-white shadow-xs"
+                      : "text-slate-700 hover:text-slate-900 hover:bg-slate-100"
+                  }`}
+                >
+                  VLI
+                </button>
+              )}
+            </div>
+          </div>
         </div>
+
+        {/* Resumo Rápido */}
         <div className="flex items-center gap-3 text-[11px] font-semibold text-gray-500">
           <span className="flex items-center gap-1">
-            <Users size={13} className="text-gray-400" /> {rankingData.length} responsáveis ativos
+            <Users size={13} className="text-gray-400" /> {rankingData.length} cadastrados
+          </span>
+          <span className="text-gray-300">•</span>
+          <span className="text-emerald-700 font-bold">
+            {activePerformersCount} com vistorias
+          </span>
+          <span className="text-gray-300">•</span>
+          <span className="text-slate-700 font-bold uppercase">
+            {totalMonthlyInspectionsCount} vistorias ({effectiveContract})
           </span>
         </div>
       </div>
@@ -252,38 +379,50 @@ export default function RankingView({
 
       {/* Cards de Destaque Superior */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {/* Líder do Mês */}
-        <div className="bg-gradient-to-br from-blue-50 to-indigo-50 border border-blue-100 rounded-xl p-4 flex items-start gap-4">
+        {/* Líder / Destaque do Mês */}
+        <div className="bg-gradient-to-br from-blue-50 to-indigo-50 border border-blue-100 rounded-xl p-4 flex items-start gap-4 shadow-2xs">
           <div className="bg-blue-100 text-blue-600 rounded-xl p-3 flex items-center justify-center shadow-xs">
             <Trophy size={24} className="text-amber-500" />
           </div>
-          <div className="min-w-0">
-            <span className="block text-[9px] uppercase font-black text-blue-700">
-              Líder do Ranking ({getEffectiveMonthKey(activeMonth)})
-            </span>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              <span className="block text-[9px] uppercase font-black text-blue-700 tracking-wider">
+                Destaque do Mês ({getEffectiveMonthKey(activeMonth)})
+              </span>
+              {effectiveContract !== "todos" && (
+                <span className="px-1.5 py-0.2 text-[8px] font-black bg-blue-200 text-blue-900 rounded uppercase">
+                  {effectiveContract}
+                </span>
+              )}
+            </div>
             <strong className="text-base text-gray-800 block mt-0.5 truncate">
               {monthLeader?.supervisor.nome || "Sem dados"}
             </strong>
             {monthLeader && monthLeader.total > 0 ? (
-              <span className="block text-[11px] text-blue-700 font-bold mt-1">
-                🏆 {monthLeader.score} pts • {monthLeader.total} inspeções ({monthLeader.dial} DIAL, {monthLeader.desvioComportamental} Desv. Comportamental)
-              </span>
+              <div className="space-y-0.5 mt-1">
+                <span className="block text-[11px] text-blue-700 font-extrabold">
+                  🏆 #{1} Lugar • {monthLeader.score} pts • {monthLeader.total} inspeções
+                </span>
+                <span className="block text-[10px] text-gray-500 font-medium">
+                  {monthLeader.dial} DIAL • {monthLeader.desvioComportamental} Desv. Comportamental • {monthLeader.outrosCount} outros tipos
+                </span>
+              </div>
             ) : (
-              <span className="block text-[11px] text-gray-400 mt-1">Nenhum lançamento no período</span>
+              <span className="block text-[11px] text-gray-400 mt-1">Nenhum lançamento no período para o filtro selecionado</span>
             )}
           </div>
         </div>
 
-        {/* Status da Sincronização */}
-        <div className="bg-emerald-50 border border-emerald-100 rounded-xl p-4 flex items-start gap-4">
+        {/* Status da Sincronização em Tempo Real */}
+        <div className="bg-emerald-50 border border-emerald-100 rounded-xl p-4 flex items-start gap-4 shadow-2xs">
           <div className="bg-emerald-100 text-emerald-600 rounded-xl p-3 flex items-center justify-center">
             <Radio className="animate-pulse" size={24} />
           </div>
           <div>
-            <span className="block text-[9px] uppercase font-black text-emerald-700">Sincronização Unificada</span>
-            <strong className="text-base text-gray-800 block mt-0.5">Supervisores & Líderes em Tempo Real</strong>
+            <span className="block text-[9px] uppercase font-black text-emerald-700">Sincronização em Tempo Real</span>
+            <strong className="text-base text-gray-800 block mt-0.5">Firestore Conectado</strong>
             <span className="block text-[11px] text-emerald-600 font-bold mt-1">
-              Todos os responsáveis ativos com pontuação automática
+              Recálculo instantâneo por mês e grupo de contrato ({effectiveContract})
             </span>
           </div>
         </div>

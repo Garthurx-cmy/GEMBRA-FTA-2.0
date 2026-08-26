@@ -5,9 +5,12 @@ import { getUniqueMonthlyInspections, getEffectiveMonthKey, getMonthOptions } fr
 import { calculateInspectionScore } from "../utils/scoring";
 import {
   deveParticiparFarolGemba,
-  getInspectionGrupoContrato,
-  getSupervisorMetaMensal,
+  isFarolVli,
   isSupervisorFromGrupoContrato,
+  normalizeName,
+  getSupervisorMetaMensal,
+  getInspectionGrupoContrato,
+  isGestorRole
 } from "../utils/operational";
 import { getTipoLancamento } from "../types";
 
@@ -37,13 +40,14 @@ interface FarolGembaViewProps {
   inspections: Inspection[];
   supervisors: Supervisor[];
   areas: Area[];
-  contracts: Contract[];
   selectedSupervisorId?: string;
   isDashboardFiltered?: boolean;
   selectedMonth?: string;
   onSelectMonth?: (month: string) => void;
   grupoContrato?: GrupoContratoFiltro;
   onSelectGrupoContrato?: (grupo: GrupoContratoFiltro) => void;
+  permittedGruposContrato?: GrupoContrato[];
+  contracts?: Contract[];
 }
 
 interface SupervisorRowData {
@@ -69,13 +73,14 @@ export default function FarolGembaView({
   inspections,
   supervisors,
   areas,
-  contracts,
   selectedSupervisorId = "all",
   isDashboardFiltered = false,
   selectedMonth: propSelectedMonth,
   onSelectMonth,
   grupoContrato = "todos",
-  onSelectGrupoContrato
+  onSelectGrupoContrato,
+  permittedGruposContrato = ["vale", "vli"],
+  contracts = []
 }: FarolGembaViewProps) {
   const [localMonth, setLocalMonth] = useState<string>("auto");
   const activeMonth = propSelectedMonth !== undefined ? propSelectedMonth : localMonth;
@@ -103,10 +108,7 @@ export default function FarolGembaView({
   const getSupervisorRole = (sup: Supervisor) => {
     const isVli = isSupervisorFromGrupoContrato(sup, "vli");
     
-    const isGestor = sup.tipoMeta === "gestor" || (sup.nome && (
-      sup.nome.toLowerCase().includes("gestor") ||
-      sup.nome.toLowerCase().includes("gerente")
-    ));
+    const isGestor = sup.tipoMeta === "gestor" || isGestorRole(sup.cargo, sup.perfil);
 
     if (isGestor) return "Gestor";
     if (isVli) return "Supervisor VLI";
@@ -114,16 +116,10 @@ export default function FarolGembaView({
   };
 
   // Process rows for a specific supervisor list and monthly inspections
-  const processSupervisorRows = (
-    supList: Supervisor[],
-    monthInspections: Inspection[],
-    contractGroup: GrupoContrato
-  ): SupervisorRowData[] => {
+  const processSupervisorRows = (supList: Supervisor[], monthInspections: Inspection[]): SupervisorRowData[] => {
     return supList
       .map((sup) => {
-        const ownInsps = monthInspections.filter(
-          (i) => i.supervisorId === sup.id && getInspectionGrupoContrato(i, areas, contracts, supervisors) === contractGroup
-        );
+        const ownInsps = monthInspections.filter((i) => i.supervisorId === sup.id);
 
         const lvcc = ownInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "LVCC").length;
         const dial = ownInsps.filter(isDialInspection).length;
@@ -144,10 +140,12 @@ export default function FarolGembaView({
           return Math.max(latest, timestamp);
         }, 0);
 
+        const isVli = isSupervisorFromGrupoContrato(sup, "vli");
+
         return {
           supervisor: sup,
           role: getSupervisorRole(sup),
-          contractGroup: (contractGroup === "vli" ? "VLI" : "Vale") as "VLI" | "Vale",
+          contractGroup: (isVli ? "VLI" : "Vale") as "VLI" | "Vale",
           metaMensal,
           lvcc,
           dial,
@@ -175,6 +173,20 @@ export default function FarolGembaView({
     return getUniqueMonthlyInspections(inspections, activeMonth);
   }, [inspections, activeMonth]);
 
+  // Contract isolation must happen before any Farol calculation. This prevents
+  // a supervisor linked to both groups from having Vale and VLI results mixed.
+  const valeMonthInspections = useMemo(() => (
+    monthInspections.filter((inspection) =>
+      getInspectionGrupoContrato(inspection, areas, contracts, supervisors) === "vale"
+    )
+  ), [monthInspections, areas, contracts, supervisors]);
+
+  const vliMonthInspections = useMemo(() => (
+    monthInspections.filter((inspection) =>
+      getInspectionGrupoContrato(inspection, areas, contracts, supervisors) === "vli"
+    )
+  ), [monthInspections, areas, contracts, supervisors]);
+
   // Filter supervisors who participate in Farol GEMBA
   const eligibleSupervisors = useMemo(() => {
     return supervisors.filter(
@@ -188,8 +200,8 @@ export default function FarolGembaView({
     const filteredList = selectedSupervisorId && selectedSupervisorId !== "all"
       ? list.filter((s) => s.id === selectedSupervisorId)
       : list;
-    return processSupervisorRows(filteredList, monthInspections, "vale");
-  }, [eligibleSupervisors, monthInspections, selectedSupervisorId, areas, contracts, supervisors]);
+    return processSupervisorRows(filteredList, valeMonthInspections);
+  }, [eligibleSupervisors, valeMonthInspections, selectedSupervisorId]);
 
   // VLI supervisors
   const vliRows = useMemo(() => {
@@ -197,8 +209,8 @@ export default function FarolGembaView({
     const filteredList = selectedSupervisorId && selectedSupervisorId !== "all"
       ? list.filter((s) => s.id === selectedSupervisorId)
       : list;
-    return processSupervisorRows(filteredList, monthInspections, "vli");
-  }, [eligibleSupervisors, monthInspections, selectedSupervisorId, areas, contracts, supervisors]);
+    return processSupervisorRows(filteredList, vliMonthInspections);
+  }, [eligibleSupervisors, vliMonthInspections, selectedSupervisorId]);
 
   const renderTable = (rows: SupervisorRowData[], title: string, metaDescription: string, badgeColor: string) => {
     return (
@@ -347,39 +359,45 @@ export default function FarolGembaView({
           {/* Contract group selector if handler is provided */}
           {onSelectGrupoContrato && (
             <div className="flex items-center gap-1 bg-white border border-gray-200 rounded-lg p-0.5 sm:ml-2">
-              <button
-                type="button"
-                onClick={() => onSelectGrupoContrato("todos")}
-                className={`px-2 py-1 text-[10px] font-extrabold uppercase rounded-md transition-colors ${
-                  grupoContrato === "todos"
-                    ? "bg-[#0B2E59] text-white"
-                    : "text-gray-600 hover:text-gray-900"
-                }`}
-              >
-                Todos
-              </button>
-              <button
-                type="button"
-                onClick={() => onSelectGrupoContrato("vale")}
-                className={`px-2 py-1 text-[10px] font-extrabold uppercase rounded-md transition-colors ${
-                  grupoContrato === "vale"
-                    ? "bg-emerald-700 text-white"
-                    : "text-gray-600 hover:text-gray-900"
-                }`}
-              >
-                Vale
-              </button>
-              <button
-                type="button"
-                onClick={() => onSelectGrupoContrato("vli")}
-                className={`px-2 py-1 text-[10px] font-extrabold uppercase rounded-md transition-colors ${
-                  grupoContrato === "vli"
-                    ? "bg-[#F58220] text-white"
-                    : "text-gray-600 hover:text-gray-900"
-                }`}
-              >
-                VLI
-              </button>
+              {permittedGruposContrato.length > 1 && (
+                <button
+                  type="button"
+                  onClick={() => onSelectGrupoContrato("todos")}
+                  className={`px-2 py-1 text-[10px] font-extrabold uppercase rounded-md transition-colors ${
+                    grupoContrato === "todos"
+                      ? "bg-[#0B2E59] text-white"
+                      : "text-gray-600 hover:text-gray-900"
+                  }`}
+                >
+                  Todos os Contratos
+                </button>
+              )}
+              {permittedGruposContrato.includes("vale") && (
+                <button
+                  type="button"
+                  onClick={() => onSelectGrupoContrato("vale")}
+                  className={`px-2 py-1 text-[10px] font-extrabold uppercase rounded-md transition-colors ${
+                    grupoContrato === "vale"
+                      ? "bg-emerald-700 text-white"
+                      : "text-gray-600 hover:text-gray-900"
+                  }`}
+                >
+                  Vale
+                </button>
+              )}
+              {permittedGruposContrato.includes("vli") && (
+                <button
+                  type="button"
+                  onClick={() => onSelectGrupoContrato("vli")}
+                  className={`px-2 py-1 text-[10px] font-extrabold uppercase rounded-md transition-colors ${
+                    grupoContrato === "vli"
+                      ? "bg-[#F58220] text-white"
+                      : "text-gray-600 hover:text-gray-900"
+                  }`}
+                >
+                  VLI
+                </button>
+              )}
             </div>
           )}
         </div>

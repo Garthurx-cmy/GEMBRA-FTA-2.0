@@ -26,10 +26,7 @@ if (hasFirebase) {
           localCache: persistentLocalCache({
             tabManager: persistentMultipleTabManager()
           }),
-          experimentalForceLongPolling: true,
-          // Proteção global: campos opcionais não preenchidos não podem impedir
-          // o salvamento inteiro de uma inspeção no Firestore.
-          ignoreUndefinedProperties: true
+          experimentalForceLongPolling: true
         },
         firebaseConfig.firestoreDatabaseId
       );

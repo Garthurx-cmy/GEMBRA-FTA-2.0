@@ -98,41 +98,25 @@ const onSnapshot = (ref: any, ...args: any[]) => {
   };
 };
 
-function removeUndefinedDeep(value: any): any {
-  if (Array.isArray(value)) {
-    return value.filter(item => item !== undefined).map(removeUndefinedDeep);
-  }
-  if (value && typeof value === "object" && Object.getPrototypeOf(value) === Object.prototype) {
-    return Object.fromEntries(
-      Object.entries(value)
-        .filter(([, item]) => item !== undefined)
-        .map(([key, item]) => [key, removeUndefinedDeep(item)])
-    );
-  }
-  return value;
-}
-
 // Trace helper for writes in development
 const setDoc = async (ref: any, data: any, options?: any) => {
-  const safeData = removeUndefinedDeep(data);
-  if (process.env.NODE_ENV !== "production") {
+  if (import.meta.env.DEV) {
     const path = ref && typeof ref.path === "string" ? ref.path : "unknown-path";
-    console.trace("[FIRESTORE WRITE]", path, "setDoc", safeData);
+    console.trace("[FIRESTORE WRITE]", path, "setDoc", data);
   }
-  return fbSetDoc(ref, safeData, options);
+  return fbSetDoc(ref, data, options);
 };
 
 const updateDoc = async (ref: any, data: any) => {
-  const safeData = removeUndefinedDeep(data);
-  if (process.env.NODE_ENV !== "production") {
+  if (import.meta.env.DEV) {
     const path = ref && typeof ref.path === "string" ? ref.path : "unknown-path";
-    console.trace("[FIRESTORE WRITE]", path, "updateDoc", safeData);
+    console.trace("[FIRESTORE WRITE]", path, "updateDoc", data);
   }
-  return fbUpdateDoc(ref, safeData);
+  return fbUpdateDoc(ref, data);
 };
 
 const deleteDoc = async (ref: any) => {
-  if (process.env.NODE_ENV !== "production") {
+  if (import.meta.env.DEV) {
     const path = ref && typeof ref.path === "string" ? ref.path : "unknown-path";
     console.trace("[FIRESTORE WRITE]", path, "deleteDoc");
   }
@@ -141,7 +125,7 @@ const deleteDoc = async (ref: any) => {
 
 const writeBatch = (firestoreInstance: any) => {
   const batch = fbWriteBatch(firestoreInstance);
-  if (process.env.NODE_ENV !== "production") {
+  if (import.meta.env.DEV) {
     console.trace("[FIRESTORE WRITE] Batch created");
   }
   return batch;
@@ -198,13 +182,18 @@ export function normalizarPerfil(rawRole?: any): string {
     return "Gestor";
   }
   if (
-    p === "supervisor" ||
     p === "lider" ||
     p === "líder" ||
     p === "lider de equipe" ||
     p === "líder de equipe" ||
+    p === "lider_equipe" ||
     p === "lider de equipe - mec" ||
-    p === "líder de equipe - mecânica" ||
+    p === "líder de equipe - mecânica"
+  ) {
+    return "Líder de Equipe";
+  }
+  if (
+    p === "supervisor" ||
     p === "engenheiro de segurança" ||
     p === "analista de segurança"
   ) {
@@ -275,7 +264,13 @@ export function normalizeUserProfile(data: any, docId?: string): UserProfile {
 
   // 6. perfil: normalizarPerfil(data.perfil ?? data.PERFIL ?? data.role ?? "visitante")
   const rawPerfil = data.perfil ?? data.PERFIL ?? data.role ?? (email === "visitante@grupofta.com.br" ? "visitante" : "supervisor");
-  const perfil = normalizarPerfil(rawPerfil);
+  let perfil = normalizarPerfil(rawPerfil);
+  // Perfis legados de líderes eram gravados como "supervisor". O cargo é usado
+  // como sinal canônico para restaurar a permissão correta sem perder acesso operacional.
+  const cargoNormalizado = normalize(cargo);
+  if (perfil === "supervisor" && (cargoNormalizado.includes("lider de equipe") || cargoNormalizado === "lider")) {
+    perfil = "Líder de Equipe";
+  }
 
   // 7. primeiroAcesso: data.primeiroAcesso ?? data.PRIMEIROACESSO ?? false
   let primeiroAcesso = false;
@@ -408,7 +403,7 @@ class DBService {
       ? ["vale", "vli"]
       : (currentProfile?.gruposContratoPermitidos && currentProfile.gruposContratoPermitidos.length > 0
           ? currentProfile.gruposContratoPermitidos
-          : ["vale"]);
+          : ["vale", "vli"]);
 
     // 1. Settings (config) - Global listener
     this.unsubscribers.push(onSnapshot(doc(db, "settings", "config"), snap => {
@@ -491,18 +486,28 @@ class DBService {
       this.readiness.contractsReady = true;
     }));
 
-    // 7. Inspections - filtro na origem para perfis de um contrato.
-    // Administradores/Gestores precisam carregar também registros legados que
-    // ainda não possuem grupoContrato; a camada de visualização os classifica e
-    // a reconciliação administrativa pode persistir o grupo posteriormente.
+    // 7. Inspections
+    // Admin/Gestor precisam carregar também os registros legados sem grupoContrato
+    // para que o Dashboard/Farol consigam recuperar o histórico completo. Usuários
+    // restritos a um único grupo continuam com filtro na origem.
     let inspQuery;
-    if (permittedGroups.length === 1) {
+    if (isAdmin || isGestor) {
       inspQuery = query(
         collection(db, "inspections"),
-        where("grupoContrato", "==", permittedGroups[0])
+        limit(3000)
+      );
+    } else if (permittedGroups.length === 1) {
+      inspQuery = query(
+        collection(db, "inspections"),
+        where("grupoContrato", "==", permittedGroups[0]),
+        limit(1000)
       );
     } else {
-      inspQuery = collection(db, "inspections");
+      inspQuery = query(
+        collection(db, "inspections"),
+        where("grupoContrato", "in", ["vale", "vli"]),
+        limit(1000)
+      );
     }
 
     this.unsubscribers.push(onSnapshot(inspQuery, snap => {
@@ -517,12 +522,12 @@ class DBService {
       this.readiness.inspectionsReady = true;
       this.emit("inspections");
     }, err => {
-      console.error("Falha ao sincronizar inspeções com filtro de origem:", err);
+      console.error("Falha ao sincronizar inspeções:", err);
       // Fallback in case of index delay
       this.readiness.inspectionsReady = true;
     }));
 
-    // 8. Admin-Only Collections: users & authorized_emails + one-time reconciliation
+    // 8. Admin-Only Collections: users & authorized_emails
     if (isAdmin) {
       this.unsubscribers.push(onSnapshot(collection(db, "users"), snap => {
         this.users = snap.docs.map(d => normalizeUserProfile(this.convert(d.data()), d.id));
@@ -538,10 +543,10 @@ class DBService {
         this.emit("authorized_emails");
       }, err => console.error("Falha ao sincronizar e-mails autorizados:", err)));
 
-      // Trigger automatic supervisor operational directory reconciliation once
-      this.reconcileSupervisors(currentProfile).catch(e => {
-        console.warn("Reconciliação automática de supervisores finalizada com aviso:", e);
-      });
+      // IMPORTANTE: nenhuma reconciliação administrativa é executada automaticamente
+      // durante a sincronização. Leitura do Dashboard/Farol não pode criar, alterar
+      // ou excluir documentos da coleção supervisors. A rotina permanece disponível
+      // apenas para execução administrativa explícita.
     } else {
       this.readiness.usersReady = true;
     }
@@ -570,7 +575,6 @@ class DBService {
         // Check if supervisor doc exists by ID or email
         const matchingSupByEmail = emailLower ? existingSups.find(s => s.email && s.email.trim().toLowerCase() === emailLower) : undefined;
 
-        const gruposDoUsuario = u.gruposContratoPermitidos?.length ? u.gruposContratoPermitidos : ["vale"] as GrupoContrato[];
         const supPayload = {
           id: u.id,
           nome: u.nome.trim(),
@@ -579,8 +583,7 @@ class DBService {
           perfil: u.perfil || "supervisor",
           ativo: Boolean(u.ativo),
           participaFarolGemba: u.participaFarolGemba !== false,
-          grupoContrato: gruposDoUsuario[0],
-          gruposContratoPermitidos: gruposDoUsuario,
+          gruposContratoPermitidos: u.gruposContratoPermitidos || ["vale", "vli"],
           updatedAt: serverTimestamp()
         };
 
@@ -588,8 +591,10 @@ class DBService {
           await setDoc(doc(db, "supervisors", u.id), supPayload, { merge: true });
           reconciled++;
 
-          // Duplicatas antigas não são apagadas automaticamente: a lista operacional
-          // já as deduplica por UID/e-mail e preservamos referências históricas.
+          // If there was an old duplicate document with a different ID and the same email, remove duplicate
+          if (matchingSupByEmail && matchingSupByEmail.id !== u.id && matchingSupByEmail.id.startsWith("sup_")) {
+            await deleteDoc(doc(db, "supervisors", matchingSupByEmail.id)).catch(() => undefined);
+          }
         } catch (err: any) {
           console.warn(`Erro ao reconciliar supervisor para ${u.email}:`, err);
           errors.push(`Erro para ${u.email}: ${err?.message || err}`);
@@ -644,30 +649,118 @@ class DBService {
       tipo?: string;
     };
   }) {
+    this.assertFirebase();
     const f = options.filters || {};
-    let list = [...this.inspections];
-    if (f.supervisorId && f.supervisorId !== "all") list = list.filter(i => i.supervisorId === f.supervisorId);
-    if (f.areaId && f.areaId !== "all") list = list.filter(i => i.areaId === f.areaId);
-    if (f.contratoId && f.contratoId !== "all") list = list.filter(i => i.contratoId === f.contratoId);
-    if (f.status && f.status !== "all") list = list.filter(i => i.status === f.status);
-    if (f.potencial && f.potencial !== "all") list = list.filter(i => i.potencial === f.potencial);
-    if (f.data) list = list.filter(i => i.data === f.data);
-    if (f.tipo && f.tipo !== "all") list = list.filter(i => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === f.tipo);
-    if (f.searchTerm) {
-      const term = f.searchTerm.trim().toLowerCase();
-      list = list.filter(i => [i.id, i.descricao, i.acaoCorretiva, i.responsavel, i.observacoes]
-        .some(value => String(value || "").toLowerCase().includes(term)));
+    
+    try {
+      // Build optimized query with direct Firestore filters
+      let q = query(collection(db, "inspections"), orderBy("data", "desc"));
+      
+      if (f.supervisorId && f.supervisorId !== "all" && f.supervisorId !== "") {
+        q = query(q, where("supervisorId", "==", f.supervisorId));
+      }
+      if (f.areaId && f.areaId !== "all" && f.areaId !== "") {
+        q = query(q, where("areaId", "==", f.areaId));
+      }
+      if (f.contratoId && f.contratoId !== "all" && f.contratoId !== "") {
+        q = query(q, where("contratoId", "==", f.contratoId));
+      }
+      if (f.status && f.status !== "all" && f.status !== "") {
+        q = query(q, where("status", "==", f.status));
+      }
+      if (f.potencial && f.potencial !== "all" && f.potencial !== "") {
+        q = query(q, where("potencial", "==", f.potencial));
+      }
+      if (f.data) {
+        q = query(q, where("data", "==", f.data));
+      }
+
+      if (options.startAfterDocId) {
+        const docSnap = await getDoc(doc(db, "inspections", options.startAfterDocId));
+        if (docSnap.exists()) {
+          q = query(q, startAfter(docSnap));
+        }
+      }
+
+      q = query(q, limit(options.limit));
+      const snap = await getDocs(q);
+      const list = snap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as Inspection));
+      
+      let filteredList = list;
+      if (f.tipo && f.tipo !== "all" && f.tipo !== "") {
+        filteredList = list.filter(item => getTipoLancamento(item.atividade, item.tipo, item.tipoLancamento) === f.tipo);
+      }
+      if (f.searchTerm) {
+        const term = f.searchTerm.toLowerCase();
+        filteredList = filteredList.filter(item => 
+          item.descricao.toLowerCase().includes(term) ||
+          item.acaoCorretiva.toLowerCase().includes(term) ||
+          item.responsavel.toLowerCase().includes(term) ||
+          (item.observacoes && item.observacoes.toLowerCase().includes(term)) ||
+          item.id.toLowerCase().includes(term)
+        );
+      }
+
+      return {
+        items: filteredList,
+        lastDocId: snap.docs.length > 0 ? snap.docs[snap.docs.length - 1].id : null,
+        hasMore: snap.docs.length === options.limit
+      };
+    } catch (err) {
+      console.warn("Firestore index query failed, using safe fallback client-side filtering:", err);
+      
+      // Fallback query: orderBy date and limit 300 to do filtering client-side
+      let q = query(collection(db, "inspections"), orderBy("data", "desc"), limit(300));
+      const snap = await getDocs(q);
+      let list = snap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as Inspection));
+      
+      if (f.supervisorId && f.supervisorId !== "all" && f.supervisorId !== "") {
+        list = list.filter(item => item.supervisorId === f.supervisorId);
+      }
+      if (f.areaId && f.areaId !== "all" && f.areaId !== "") {
+        list = list.filter(item => item.areaId === f.areaId);
+      }
+      if (f.contratoId && f.contratoId !== "all" && f.contratoId !== "") {
+        list = list.filter(item => item.contratoId === f.contratoId);
+      }
+      if (f.status && f.status !== "all" && f.status !== "") {
+        list = list.filter(item => item.status === f.status);
+      }
+      if (f.potencial && f.potencial !== "all" && f.potencial !== "") {
+        list = list.filter(item => item.potencial === f.potencial);
+      }
+      if (f.data) {
+        list = list.filter(item => item.data === f.data);
+      }
+      if (f.tipo && f.tipo !== "all" && f.tipo !== "") {
+        list = list.filter(item => getTipoLancamento(item.atividade, item.tipo, item.tipoLancamento) === f.tipo);
+      }
+      if (f.searchTerm) {
+        const term = f.searchTerm.toLowerCase();
+        list = list.filter(item => 
+          item.descricao.toLowerCase().includes(term) ||
+          item.acaoCorretiva.toLowerCase().includes(term) ||
+          item.responsavel.toLowerCase().includes(term) ||
+          (item.observacoes && item.observacoes.toLowerCase().includes(term)) ||
+          item.id.toLowerCase().includes(term)
+        );
+      }
+
+      let startIndex = 0;
+      if (options.startAfterDocId) {
+        const foundIdx = list.findIndex(item => item.id === options.startAfterDocId);
+        if (foundIdx !== -1) {
+          startIndex = foundIdx + 1;
+        }
+      }
+
+      const paginatedList = list.slice(startIndex, startIndex + options.limit);
+      return {
+        items: paginatedList,
+        lastDocId: paginatedList.length > 0 ? paginatedList[paginatedList.length - 1].id : null,
+        hasMore: startIndex + options.limit < list.length
+      };
     }
-    list.sort((a, b) => (b.data || "").localeCompare(a.data || "") || (b.createdAt || "").localeCompare(a.createdAt || ""));
-    const startIndex = options.startAfterDocId
-      ? Math.max(0, list.findIndex(i => i.id === options.startAfterDocId) + 1)
-      : 0;
-    const items = list.slice(startIndex, startIndex + options.limit);
-    return {
-      items,
-      lastDocId: items.length ? items[items.length - 1].id : null,
-      hasMore: startIndex + items.length < list.length
-    };
   }
 
   async getInspectionById(id: string): Promise<Inspection | null> {
@@ -726,7 +819,18 @@ class DBService {
   }
 
   getInspections = () => [...this.inspections];
-  getSupervisors = () => [...this.supervisors];
+  getSupervisors = () => {
+    return this.supervisors.map(sup => {
+      if (this.isJhonata(sup)) {
+        return {
+          ...sup,
+          metaSemanal: 2,
+          metaMensal: 8
+        };
+      }
+      return sup;
+    });
+  };
   getAreas = () => [...this.areas];
   getContracts = () => [...this.contracts];
   getUsers = () => [...this.users];
@@ -755,25 +859,25 @@ class DBService {
   async saveInspection(inspection: Inspection): Promise<void> {
     this.assertFirebase();
     const isNew = !this.inspections.some(i => i.id === inspection.id);
-    const grupoContrato = inspection.grupoContrato || getInspectionGrupoContrato(
+    const grupoCalculado = getInspectionGrupoContrato(
       inspection,
       this.areas,
       this.contracts,
       this.supervisors,
       this.deletedNames
     );
-    const rawPayload: any = {
+    const grupoContrato: GrupoContrato | undefined = grupoCalculado === "nao_classificado"
+      ? (inspection.grupoContrato === "vale" || inspection.grupoContrato === "vli" ? inspection.grupoContrato : undefined)
+      : grupoCalculado;
+    const payload: any = {
       ...inspection,
-      grupoContrato,
       fotosAntes: inspection.fotosAntes || [],
       fotosDepois: inspection.fotosDepois || [],
       createdAt: inspection.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       atualizadoEm: serverTimestamp()
     };
-    const payload = Object.fromEntries(
-      Object.entries(rawPayload).filter(([, value]) => value !== undefined)
-    );
+    if (grupoContrato) payload.grupoContrato = grupoContrato;
     await setDoc(doc(db, "inspections", inspection.id), payload, { merge: true });
     await this.addAuditLog(isNew ? "create" : "update", "inspection", inspection.id, { supervisorId: inspection.supervisorId, status: inspection.status });
     const supName = this.supervisors.find(s => s.id === inspection.supervisorId)?.nome || this.users.find(u => u.id === inspection.supervisorId)?.nome || (auth?.currentUser?.uid === inspection.supervisorId ? (auth.currentUser.displayName || auth.currentUser.email) : "") || "Usuário";
@@ -832,9 +936,6 @@ class DBService {
     await setDoc(doc(db, "users", user.id), { ...user, email: emailKey, updatedAt: serverTimestamp() }, { merge: true });
 
     // Sync operational supervisors directory
-    const gruposDoUsuario = user.gruposContratoPermitidos?.length
-      ? user.gruposContratoPermitidos
-      : (["Desenvolvedor/Admin", "Administrador", "Gestor"].includes(user.perfil) ? ["vale", "vli"] : ["vale"] as GrupoContrato[]);
     const supPayload = {
       id: user.id,
       nome: user.nome.trim(),
@@ -843,8 +944,7 @@ class DBService {
       perfil: user.perfil,
       ativo: Boolean(user.ativo),
       participaFarolGemba: user.participaFarolGemba !== false,
-      grupoContrato: gruposDoUsuario[0],
-      gruposContratoPermitidos: gruposDoUsuario,
+      gruposContratoPermitidos: user.gruposContratoPermitidos || ["vale", "vli"],
       updatedAt: serverTimestamp()
     };
     await setDoc(doc(db, "supervisors", user.id), supPayload, { merge: true });
@@ -864,12 +964,9 @@ class DBService {
     const duplicate = this.users.find(u => u.id !== id && normalize(u.email) === emailKey);
     if (duplicate) throw new Error("Este e-mail já está cadastrado.");
 
-    const existing = this.users.find(u => u.id === id);
     const gruposPermitidos = data.gruposContratoPermitidos && data.gruposContratoPermitidos.length > 0
       ? data.gruposContratoPermitidos
-      : existing?.gruposContratoPermitidos?.length
-        ? existing.gruposContratoPermitidos
-        : (["Desenvolvedor/Admin", "Administrador", "Gestor"].includes(data.perfil) ? ["vale", "vli"] : ["vale"]);
+      : ["vale", "vli"];
 
     // Strict canonical payload - no uppercase fields, only documented canonical fields
     const payload = {
@@ -879,7 +976,6 @@ class DBService {
       perfil: data.perfil,
       ativo: Boolean(data.ativo),
       participaFarolGemba: Boolean(data.participaFarolGemba),
-      grupoContrato: gruposPermitidos[0],
       gruposContratoPermitidos: gruposPermitidos,
       updatedAt: serverTimestamp()
     };
@@ -895,7 +991,6 @@ class DBService {
       perfil: data.perfil,
       ativo: Boolean(data.ativo),
       participaFarolGemba: Boolean(data.participaFarolGemba),
-      grupoContrato: gruposPermitidos[0],
       gruposContratoPermitidos: gruposPermitidos,
       updatedAt: serverTimestamp()
     };
@@ -1212,6 +1307,11 @@ class DBService {
       // Check special 13 users
       const special13 = NOVOS_13_USUARIOS_PADRAO.find(u => u.email.toLowerCase() === normalized.email.toLowerCase());
       if (special13) {
+        const specialIsLeader = normalize(special13.cargo).includes("lider de equipe");
+        if (specialIsLeader && normalized.perfil !== "Líder de Equipe") {
+          changes.push('perfil: "Líder de Equipe"');
+          normalized.perfil = "Líder de Equipe";
+        }
         if (normalized.participaFarolGemba !== false) {
           changes.push("Definir participaFarolGemba: false (Regra Liderança/Segurança)");
           normalized.participaFarolGemba = false;
@@ -1300,6 +1400,11 @@ class DBService {
       // Special 13 users check
       const special13 = NOVOS_13_USUARIOS_PADRAO.find(u => u.email.toLowerCase() === normalized.email.toLowerCase());
       if (special13) {
+        const specialIsLeader = normalize(special13.cargo).includes("lider de equipe");
+        if (specialIsLeader && normalized.perfil !== "Líder de Equipe") {
+          changes.push('perfil: "Líder de Equipe"');
+          normalized.perfil = "Líder de Equipe";
+        }
         if (normalized.participaFarolGemba !== false) {
           normalized.participaFarolGemba = false;
           changes.push("participaFarolGemba: false");
@@ -1385,8 +1490,9 @@ class DBService {
 
       if (existing) {
         try {
+          const isLeader = normalize(item.cargo).includes("lider de equipe");
           await updateDoc(doc(db, "users", existing.id), {
-            perfil: "supervisor",
+            perfil: isLeader ? "Líder de Equipe" : "supervisor",
             cargo: existing.cargo || item.cargo,
             ativo: true,
             primeiroAcesso: existing.primeiroAcesso ?? true,
@@ -1405,7 +1511,7 @@ class DBService {
           await setDoc(doc(db, "authorized_emails", authEmailId), {
             id: authEmailId,
             email: emailLower,
-            perfilPadrao: "Supervisor",
+            perfilPadrao: normalize(item.cargo).includes("lider de equipe") ? "Líder de Equipe" : "Supervisor",
             ativo: true,
             updatedAt: serverTimestamp()
           }, { merge: true });
@@ -1419,6 +1525,20 @@ class DBService {
     return { created, updated, errors };
   }
 
+  private isJhonata(sup?: any): boolean {
+    if (!sup) return false;
+    const email = String(sup.email || "").trim().toLowerCase();
+    const nome = String(sup.nome || "").toLowerCase();
+    const id = String(sup.id || "").toLowerCase();
+    return (
+      email === "j.santos@grupofta.com.br" ||
+      email === "jhonata.santos@grupofta.com.br" ||
+      email.startsWith("jhonata") ||
+      id.includes("j_santos") ||
+      id.includes("jhonata") ||
+      (nome.includes("jhonata") && (nome.includes("santos") || nome.includes("gonçalves") || nome.includes("goncalves")))
+    );
+  }
 }
 
 export const dbService = new DBService();

@@ -86,10 +86,7 @@ export function buildUnifiedSupervisors(
         cargo: s.cargo || matchingUser?.cargo || matchingUser?.perfil || s.unidade || "Supervisor",
         perfil: s.perfil || matchingUser?.perfil || "Supervisor",
         participaFarolGemba: !isFarolDisabled,
-        grupoContrato: s.grupoContrato || matchingUser?.gruposContratoPermitidos?.[0],
-        gruposContratoPermitidos: s.gruposContratoPermitidos?.length
-          ? s.gruposContratoPermitidos
-          : matchingUser?.gruposContratoPermitidos
+        gruposContratoPermitidos: s.gruposContratoPermitidos || matchingUser?.gruposContratoPermitidos
       });
     }
   }
@@ -110,7 +107,6 @@ export function buildUnifiedSupervisors(
         perfil: u.perfil,
         ativo: Boolean(u.ativo),
         participaFarolGemba: u.participaFarolGemba,
-        grupoContrato: u.gruposContratoPermitidos?.[0],
         gruposContratoPermitidos: u.gruposContratoPermitidos
       });
     }

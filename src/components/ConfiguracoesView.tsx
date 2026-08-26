@@ -10,8 +10,7 @@ import {
   Contract,
   SystemConfig,
   UserProfile,
-  ProcessoChecklist,
-  GrupoContrato
+  ProcessoChecklist
 } from "../types";
 import {
   Settings,
@@ -184,7 +183,6 @@ export default function ConfiguracoesView({
   const [userModalPerfil, setUserModalPerfil] = useState<"Desenvolvedor/Admin" | "Supervisor" | "Gestor" | "Líder de Equipe" | "Visitante">("Supervisor");
   const [userModalStatus, setUserModalStatus] = useState<"Ativo" | "Inativo">("Ativo");
   const [userModalParticipaFarolGemba, setUserModalParticipaFarolGemba] = useState<boolean>(true);
-  const [userModalGruposContrato, setUserModalGruposContrato] = useState<GrupoContrato[]>(["vale"]);
   const [isSavingUser, setIsSavingUser] = useState(false);
   const [userModalError, setUserModalError] = useState("");
 
@@ -494,7 +492,6 @@ export default function ConfiguracoesView({
     setUserModalEmail("");
     setUserModalCargo("");
     setUserModalPassword("");
-    setUserModalGruposContrato(["vale"]);
     setUserModalError("");
   };
 
@@ -507,7 +504,6 @@ export default function ConfiguracoesView({
     setUserModalPerfil("Supervisor");
     setUserModalStatus("Ativo");
     setUserModalParticipaFarolGemba(true);
-    setUserModalGruposContrato(["vale"]);
     setUserModalError("");
     setUserModalOpen(true);
   };
@@ -537,11 +533,6 @@ export default function ConfiguracoesView({
 
     setUserModalStatus(u.ativo ? "Ativo" : "Inativo");
     setUserModalParticipaFarolGemba(u.participaFarolGemba !== false);
-    setUserModalGruposContrato(
-      u.gruposContratoPermitidos?.length
-        ? u.gruposContratoPermitidos
-        : (["Desenvolvedor/Admin", "Administrador", "Gestor"].includes(u.perfil) ? ["vale", "vli"] : ["vale"])
-    );
     setUserModalOpen(true);
   };
 
@@ -573,12 +564,6 @@ export default function ConfiguracoesView({
     }
     if (!userModalPerfil) {
       const err = "Por favor, selecione o Perfil de Permissão.";
-      setUserModalError(err);
-      showError(err);
-      return;
-    }
-    if (userModalGruposContrato.length === 0) {
-      const err = "Selecione pelo menos um contrato permitido: Vale ou VLI.";
       setUserModalError(err);
       showError(err);
       return;
@@ -622,8 +607,8 @@ export default function ConfiguracoesView({
 
     try {
       // Map Perfil and Farol participation according to rules:
-      // If "Líder de Equipe (acesso Supervisor)":
-      //   perfil -> "supervisor"
+      // If "Líder de Equipe":
+      //   perfil -> "Líder de Equipe"
       //   cargo -> cargoTrim || "LÍDER DE EQUIPE"
       //   participaFarolGemba -> false (or user selection)
       let canonicalPerfil = "supervisor";
@@ -637,7 +622,7 @@ export default function ConfiguracoesView({
       } else if (userModalPerfil === "Visitante") {
         canonicalPerfil = "visitante";
       } else if (userModalPerfil === "Líder de Equipe") {
-        canonicalPerfil = "supervisor";
+        canonicalPerfil = "Líder de Equipe";
         if (!canonicalCargo) {
           canonicalCargo = "LÍDER DE EQUIPE";
         }
@@ -656,8 +641,7 @@ export default function ConfiguracoesView({
           cargo: canonicalCargo,
           perfil: canonicalPerfil,
           ativo: userModalStatus === "Ativo",
-          participaFarolGemba: canonicalParticipaFarol,
-          gruposContratoPermitidos: userModalGruposContrato
+          participaFarolGemba: canonicalParticipaFarol
         });
       } else {
         // CREATE NEW USER
@@ -677,7 +661,6 @@ export default function ConfiguracoesView({
           perfil: canonicalPerfil,
           ativo: userModalStatus === "Ativo",
           participaFarolGemba: canonicalParticipaFarol,
-          gruposContratoPermitidos: userModalGruposContrato,
           primeiroAcesso: true,
           deveAlterarSenha: true
         };
@@ -690,9 +673,7 @@ export default function ConfiguracoesView({
       );
       if (matchingSup) {
         await dbService.updateSupervisor(matchingSup.id, {
-          participaFarolGemba: canonicalParticipaFarol,
-          grupoContrato: userModalGruposContrato[0],
-          gruposContratoPermitidos: userModalGruposContrato
+          participaFarolGemba: canonicalParticipaFarol
         });
       }
 
@@ -2122,7 +2103,7 @@ export default function ConfiguracoesView({
                       }}
                       className="sr-only"
                     />
-                    Líder de Equipe (acesso Supervisor)
+                    Líder de Equipe (acesso operacional)
                   </label>
                 </div>
               </div>
@@ -2199,32 +2180,6 @@ export default function ConfiguracoesView({
                     />
                     Não (Não participa)
                   </label>
-                </div>
-              </div>
-
-              {/* Contratos permitidos */}
-              <div className="flex flex-col gap-1">
-                <label className="font-bold text-gray-600">Contratos permitidos</label>
-                <p className="text-[10px] text-gray-400">
-                  O usuário verá somente informações dos contratos selecionados.
-                </p>
-                <div className="grid grid-cols-2 gap-2 mt-1">
-                  {(["vale", "vli"] as GrupoContrato[]).map((grupo) => {
-                    const checked = userModalGruposContrato.includes(grupo);
-                    return (
-                      <label key={grupo} className={`flex items-center justify-center p-2 rounded-lg border cursor-pointer font-bold text-xs uppercase ${checked ? "border-[#0B2E59] bg-blue-50 text-[#0B2E59]" : "border-gray-200 text-gray-600"}`}>
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={() => setUserModalGruposContrato((current) =>
-                            checked ? current.filter((item) => item !== grupo) : [...current, grupo]
-                          )}
-                          className="sr-only"
-                        />
-                        {grupo}
-                      </label>
-                    );
-                  })}
                 </div>
               </div>
             </div>

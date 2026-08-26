@@ -11,6 +11,7 @@ import { jsPDF } from "jspdf";
 import html2canvas from "html2canvas";
 import ResolvedImage from "./ResolvedImage";
 
+
 interface RelatoriosViewProps {
   inspections: Inspection[];
   supervisors: Supervisor[];
@@ -181,7 +182,7 @@ export default function RelatoriosView({
     const set = new Set<string>();
     combinedInspections.forEach((i) => {
       if (i.tipo) set.add(i.tipo);
-      const resolved = getTipoLancamento(i.atividade, i.tipo);
+      const resolved = getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento);
       if (resolved) set.add(resolved);
     });
     return Array.from(set);
@@ -212,7 +213,7 @@ export default function RelatoriosView({
         return false;
       }
       if (selectedTipo) {
-        const itemTipoLancamento = getTipoLancamento(item.atividade, item.tipo);
+        const itemTipoLancamento = getTipoLancamento(item.atividade, item.tipo, item.tipoLancamento);
         if (item.tipo !== selectedTipo && itemTipoLancamento !== selectedTipo) {
           return false;
         }
@@ -280,8 +281,8 @@ export default function RelatoriosView({
   };
 
   const selectedInspection = inspections.find((i) => i.id === selectedId);
-  const isDSS = selectedInspection && getTipoLancamento(selectedInspection.atividade, selectedInspection.tipo) === "DSS";
-  const isPresenca = selectedInspection && getTipoLancamento(selectedInspection.atividade, selectedInspection.tipo) === "Presença em Campo";
+  const isDSS = selectedInspection && getTipoLancamento(selectedInspection.atividade, selectedInspection.tipo, selectedInspection.tipoLancamento) === "DSS";
+  const isPresenca = selectedInspection && getTipoLancamento(selectedInspection.atividade, selectedInspection.tipo, selectedInspection.tipoLancamento) === "Presença em Campo";
 
   // Helper resolvers
   const getSupervisorName = (id: string) => supervisors.find((s) => s.id === id)?.nome || dbService.getDeletedNames()[id] || "Outros";
@@ -631,7 +632,7 @@ export default function RelatoriosView({
 
       // Trigger notification for PDF generation
       const supervisorName = getSupervisorName(selectedInspection.supervisorId);
-      const launchType = getTipoLancamento(selectedInspection.atividade, selectedInspection.tipo);
+      const launchType = getTipoLancamento(selectedInspection.atividade, selectedInspection.tipo, selectedInspection.tipoLancamento);
       dbService.addNotification(supervisorName, "gerou um Relatório PDF", launchType);
     } catch (err) {
       console.error("Erro ao gerar PDF:", err);

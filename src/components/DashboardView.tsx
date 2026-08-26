@@ -53,11 +53,11 @@ import FarolGembaView from "./FarolGembaView";
 import ResolvedImage from "./ResolvedImage";
 import {
   getInspectionScore,
-  deveParticiparFarolGemba,
   getInspectionGrupoContrato,
+  getSupervisorTargets,
   isSupervisorFromGrupoContrato,
   getGrupoContratoPorLocalidade,
-  getSupervisorTargets
+  isLeaderRole
 } from "../utils/operational";
 import {
   getOperationalWeek,
@@ -73,8 +73,6 @@ import {
   CartesianGrid,
   Tooltip as RechartsTooltip
 } from "recharts";
-
-
 
 interface DashboardViewProps {
   inspections: Inspection[];
@@ -235,7 +233,7 @@ export default function DashboardView({
       }
 
       // 4. Type filter
-      if (selectedTipo !== "all" && getTipoLancamento(item.atividade, item.tipo, item.tipoLancamento) !== selectedTipo) {
+      if (selectedTipo !== "all" && getTipoLancamento(item.atividade, item.tipo) !== selectedTipo) {
         return false;
       }
 
@@ -377,16 +375,13 @@ export default function DashboardView({
   const monthlyInspections = useMemo(() => {
     const baseList = getUniqueMonthlyInspections(inspections, dashboardMonthKey);
     return baseList.filter((insp) => {
-      const inspGrupo = getInspectionGrupoContrato(insp, areas, contracts, supervisors, dbService.getDeletedNames());
-      if (grupoContrato === "vale" && inspGrupo !== "vale") return false;
-      if (grupoContrato === "vli" && inspGrupo !== "vli") return false;
       if (selectedSupervisorId !== "all" && insp.supervisorId !== selectedSupervisorId) return false;
       if (selectedAreaId !== "all" && insp.areaId !== selectedAreaId) return false;
-      if (selectedTipo !== "all" && getTipoLancamento(insp.atividade, insp.tipo, insp.tipoLancamento) !== selectedTipo) return false;
+      if (selectedTipo !== "all" && getTipoLancamento(insp.atividade, insp.tipo) !== selectedTipo) return false;
       if (selectedPotencial !== "all" && insp.potencial !== selectedPotencial) return false;
       return true;
     });
-  }, [inspections, dashboardMonthKey, selectedSupervisorId, selectedAreaId, selectedTipo, selectedPotencial, grupoContrato, areas, contracts, supervisors]);
+  }, [inspections, dashboardMonthKey, selectedSupervisorId, selectedAreaId, selectedTipo, selectedPotencial]);
 
   const calendarDays = useMemo(() => {
     const year = currentCalendarMonth.getFullYear();
@@ -429,15 +424,15 @@ export default function DashboardView({
     const total = filteredInspections.length;
     const activeSups = new Set(filteredInspections.map((i) => i.supervisorId)).size;
 
-    const dss = filteredInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "DSS").length;
-    const ar = filteredInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "AR").length;
-    const lvcc = filteredInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "LVCC").length;
+    const dss = filteredInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "DSS").length;
+    const ar = filteredInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "AR").length;
+    const lvcc = filteredInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "LVCC").length;
     const dial = filteredInspections.filter(isDialInspection).length;
     const desviosComportamentais = filteredInspections.filter(isDesvioComportamentalInspection).length;
-    const desviosEstruturais = filteredInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Desvio Estrutural").length;
-    const notificacoes = filteredInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Notificação").length;
-    const interdicoes = filteredInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Interdição").length;
-    const presenca = filteredInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Presença em Campo").length;
+    const desviosEstruturais = filteredInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "Desvio Estrutural").length;
+    const notificacoes = filteredInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "Notificação").length;
+    const interdicoes = filteredInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "Interdição").length;
+    const presenca = filteredInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "Presença em Campo").length;
     const criticos = filteredInspections.filter((i) => i.potencial === Potential.CRITICO).length;
 
     // Supervisor Destaque da Semana math (Most inspections in this current filtered list)
@@ -490,13 +485,8 @@ export default function DashboardView({
     const endOfMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0);
     endOfMonth.setHours(23, 59, 59, 999);
 
-    const activeSups = supervisors.filter((s) => {
-      if (!s.ativo) return false;
-      if (grupoContrato === "vale") return isSupervisorFromGrupoContrato(s, "vale");
-      if (grupoContrato === "vli") return isSupervisorFromGrupoContrato(s, "vli");
-      return true;
-    });
-    const activeSupsForGoals = activeSups.filter(s => deveParticiparFarolGemba(s));
+    const activeSups = availableSupervisors.filter(s => s.ativo !== false);
+    const activeSupsForGoals = activeSups;
     const selectedSupervisor = activeSups.find(s => s.id === selectedSupervisorId);
     const targetPerType = 7;
     const weeklyGoal = (sup?: Supervisor) => sup ? getSupervisorTargets(sup).weekly : 4;
@@ -512,14 +502,14 @@ export default function DashboardView({
     const monthInspections = monthlyInspections;
 
     // Counts for each of the types for this week
-    const dssCount = weekInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "DSS").length;
-    const arCount = weekInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "AR").length;
-    const lvccCount = weekInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "LVCC").length;
+    const dssCount = weekInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "DSS").length;
+    const arCount = weekInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "AR").length;
+    const lvccCount = weekInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "LVCC").length;
     const dialCount = weekInspections.filter(isDialInspection).length;
     const comportamentalCount = weekInspections.filter(isDesvioComportamentalInspection).length;
-    const estruturalCount = weekInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Desvio Estrutural").length;
-    const notificacaoCount = weekInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Notificação").length;
-    const interdicaoCount = weekInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Interdição").length;
+    const estruturalCount = weekInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "Desvio Estrutural").length;
+    const notificacaoCount = weekInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "Notificação").length;
+    const interdicaoCount = weekInspections.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "Interdição").length;
 
     // A Type is achieved for the week if its count reaches targetPerType
     const dssAchieved = dssCount >= targetPerType;
@@ -545,18 +535,9 @@ export default function DashboardView({
     const totalWeeklyAchieved = selectedSupervisorId === "all"
       ? activeSupsForGoals.reduce((sum, sup) => {
           const count = weekInspections.filter(i => i.supervisorId === sup.id).length;
-          if (sup.tipoMeta === "quantitativa") return sum + Math.min(count, weeklyGoal(sup));
-          const achievedTypes = new Set(
-            weekInspections
-              .filter(i => i.supervisorId === sup.id)
-              .map(i => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento))
-              .filter(type => type !== "Presença em Campo")
-          ).size;
-          return sum + Math.min(achievedTypes, weeklyGoal(sup));
+          return sum + Math.min(count, weeklyGoal(sup));
         }, 0)
-      : isQuantitativeGoal
-        ? Math.min(weekInspections.length, totalWeeklyTarget)
-        : typeBasedWeeklyAchieved;
+      : Math.min(weekInspections.length, totalWeeklyTarget);
     const weeklyPercentage = Math.min(100, Math.round((totalWeeklyAchieved / totalWeeklyTarget) * 100));
 
     // Monthly progress
@@ -564,7 +545,28 @@ export default function DashboardView({
     const monthlyTarget = selectedSupervisorId === "all"
       ? Math.max(activeSupsForGoals.reduce((sum, sup) => sum + monthlyGoal(sup), 0), 1)
       : monthlyGoal(selectedSupervisor);
-    const monthlyPercentage = monthlyTarget > 0 ? Math.round((monthlyTotalCount / monthlyTarget) * 100) : 0;
+    const monthlyPercentage = monthlyTarget > 0 ? Math.min(100, Math.round((monthlyTotalCount / monthlyTarget) * 100)) : 0;
+
+    const contractBreakdowns = grupoContrato === "todos" && selectedSupervisorId === "all"
+      ? (["vale", "vli"] as GrupoContrato[]).map((group) => {
+          const groupSups = activeSupsForGoals.filter(s => isSupervisorFromGrupoContrato(s, group));
+          const groupWeek = weekInspections.filter(i => getInspectionGrupoContrato(i, areas, contracts, supervisors) === group);
+          const groupMonth = monthInspections.filter(i => getInspectionGrupoContrato(i, areas, contracts, supervisors) === group);
+          const weeklyTarget = groupSups.reduce((sum, sup) => sum + weeklyGoal(sup), 0);
+          const monthlyTarget = groupSups.reduce((sum, sup) => sum + monthlyGoal(sup), 0);
+          const weeklyDone = groupSups.reduce((sum, sup) => sum + Math.min(groupWeek.filter(i => i.supervisorId === sup.id).length, weeklyGoal(sup)), 0);
+          const monthlyDone = groupMonth.length;
+          return {
+            group,
+            weeklyDone,
+            weeklyTarget,
+            weeklyPercentage: weeklyTarget ? Math.min(100, Math.round((weeklyDone / weeklyTarget) * 100)) : 0,
+            monthlyDone,
+            monthlyTarget,
+            monthlyPercentage: monthlyTarget ? Math.min(100, Math.round((monthlyDone / monthlyTarget) * 100)) : 0
+          };
+        })
+      : null;
 
     // Dynamic smart alerts with priorities
     const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
@@ -608,7 +610,7 @@ export default function DashboardView({
         });
       }
 
-      const openInterdicao = unresolved.some((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Interdição");
+      const openInterdicao = unresolved.some((i) => getTipoLancamento(i.atividade, i.tipo) === "Interdição");
       if (openInterdicao) {
         smartAlertsList.push({
           text: `${sup.nome} possui Interdição com tratativa pendente.`,
@@ -633,7 +635,7 @@ export default function DashboardView({
         });
       }
 
-      const openNotificacao = unresolved.some((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Notificação");
+      const openNotificacao = unresolved.some((i) => getTipoLancamento(i.atividade, i.tipo) === "Notificação");
       if (openNotificacao) {
         smartAlertsList.push({
           text: `${sup.nome} possui Notificação pendente.`,
@@ -644,16 +646,16 @@ export default function DashboardView({
       // Pendente weekly targets
       const supWeekInsps = weeklyInspections.filter((i) => i.supervisorId === sup.id);
 
-      const supDss = supWeekInsps.some((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "DSS");
-      const supAr = supWeekInsps.some((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "AR");
-      const supLvcc = supWeekInsps.some((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "LVCC");
+      const supDss = supWeekInsps.some((i) => getTipoLancamento(i.atividade, i.tipo) === "DSS");
+      const supAr = supWeekInsps.some((i) => getTipoLancamento(i.atividade, i.tipo) === "AR");
+      const supLvcc = supWeekInsps.some((i) => getTipoLancamento(i.atividade, i.tipo) === "LVCC");
       const supDial = supWeekInsps.some(isDialInspection);
       const supComportamental = supWeekInsps.some(isDesvioComportamentalInspection);
-      const supEstrutural = supWeekInsps.some((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Desvio Estrutural");
-      const supNotificacao = supWeekInsps.some((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Notificação");
-      const supInterdicao = supWeekInsps.some((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Interdição");
+      const supEstrutural = supWeekInsps.some((i) => getTipoLancamento(i.atividade, i.tipo) === "Desvio Estrutural");
+      const supNotificacao = supWeekInsps.some((i) => getTipoLancamento(i.atividade, i.tipo) === "Notificação");
+      const supInterdicao = supWeekInsps.some((i) => getTipoLancamento(i.atividade, i.tipo) === "Interdição");
 
-      if (sup.tipoMeta === "quantitativa") {
+      if (sup.tipoMeta === "quantitativa" || isLeaderRole(sup.cargo, sup.perfil)) {
         const goal = weeklyGoal(sup);
         if (supWeekInsps.length < goal) smartAlertsList.push({ text: `${sup.nome} realizou ${supWeekInsps.length}/${goal} inspeções nesta semana.`, type: "pendente" });
       } else {
@@ -727,54 +729,10 @@ export default function DashboardView({
       monthlyTotalCount,
       monthlyTarget,
       monthlyPercentage,
+      contractBreakdowns,
       smartAlerts: smartAlertsList
     };
-  }, [weeklyInspections, monthlyInspections, filteredInspections, selectedSupervisorId, supervisors, grupoContrato]);
-
-
-  const contractGoalSummaries = useMemo(() => {
-    const build = (group: GrupoContrato) => {
-      const groupSupervisors = supervisors.filter(
-        (sup) => sup.ativo && deveParticiparFarolGemba(sup) && isSupervisorFromGrupoContrato(sup, group)
-      );
-      const groupWeek = weeklyInspections.filter(
-        (insp) => getInspectionGrupoContrato(insp, areas, contracts, supervisors, dbService.getDeletedNames()) === group
-      );
-      const groupMonth = monthlyInspections.filter(
-        (insp) => getInspectionGrupoContrato(insp, areas, contracts, supervisors, dbService.getDeletedNames()) === group
-      );
-
-      const weeklyTarget = Math.max(
-        groupSupervisors.reduce((sum, sup) => sum + getSupervisorTargets(sup).weekly, 0),
-        1
-      );
-      const monthlyTarget = Math.max(
-        groupSupervisors.reduce((sum, sup) => sum + getSupervisorTargets(sup).monthly, 0),
-        1
-      );
-      const weeklyDone = groupSupervisors.reduce((sum, sup) => {
-        const own = groupWeek.filter((insp) => insp.supervisorId === sup.id);
-        const goal = getSupervisorTargets(sup).weekly;
-        if (sup.tipoMeta === "quantitativa") return sum + Math.min(own.length, goal);
-        const uniqueTypes = new Set(
-          own.map((insp) => getTipoLancamento(insp.atividade, insp.tipo, insp.tipoLancamento))
-            .filter((type) => type !== "Presença em Campo")
-        ).size;
-        return sum + Math.min(uniqueTypes, goal);
-      }, 0);
-
-      return {
-        weeklyDone,
-        weeklyTarget,
-        weeklyPercentage: Math.min(100, Math.round((weeklyDone / weeklyTarget) * 100)),
-        monthlyDone: groupMonth.length,
-        monthlyTarget,
-        monthlyPercentage: Math.min(100, Math.round((groupMonth.length / monthlyTarget) * 100))
-      };
-    };
-
-    return { vale: build("vale"), vli: build("vli") };
-  }, [weeklyInspections, monthlyInspections, supervisors, areas, contracts]);
+  }, [weeklyInspections, monthlyInspections, filteredInspections, selectedSupervisorId, supervisors, availableSupervisors, grupoContrato, areas, contracts]);
 
   // --- NEW MEMOS FOR ADVANCED CARDS ---
   const topSupervisorsOfWeek = useMemo(() => {
@@ -793,14 +751,14 @@ export default function DashboardView({
         const supWeekInsps = weeklyInspections.filter((i) => i.supervisorId === sup.id);
 
         // Count unique types achieved
-        const dssCount = supWeekInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "DSS").length;
-        const arCount = supWeekInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "AR").length;
-        const lvccCount = supWeekInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "LVCC").length;
+        const dssCount = supWeekInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "DSS").length;
+        const arCount = supWeekInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "AR").length;
+        const lvccCount = supWeekInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "LVCC").length;
         const dialCount = supWeekInsps.filter(isDialInspection).length;
         const comportamentalCount = supWeekInsps.filter(isDesvioComportamentalInspection).length;
-        const estruturalCount = supWeekInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Desvio Estrutural").length;
-        const notificacaoCount = supWeekInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Notificação").length;
-        const interdicaoCount = supWeekInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Interdição").length;
+        const estruturalCount = supWeekInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "Desvio Estrutural").length;
+        const notificacaoCount = supWeekInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "Notificação").length;
+        const interdicaoCount = supWeekInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "Interdição").length;
 
         const typeBasedAchievedCount = 
           (dssCount >= 1 ? 1 : 0) + 
@@ -814,7 +772,7 @@ export default function DashboardView({
 
         // Weekly target
         const weeklyTarget = getSupervisorTargets(sup).weekly;
-        const weeklyAchievedCount = sup.tipoMeta === "quantitativa"
+        const weeklyAchievedCount = sup.tipoMeta === "quantitativa" || isLeaderRole(sup.cargo, sup.perfil)
           ? Math.min(supWeekInsps.length, weeklyTarget)
           : Math.min(typeBasedAchievedCount, weeklyTarget);
         const percentage = Math.min(100, Math.round((weeklyAchievedCount / weeklyTarget) * 100));
@@ -856,13 +814,13 @@ export default function DashboardView({
   const pendingOperationalCounts = useMemo(() => {
     const unresolved = filteredInspections.filter((i) => i.status !== InspectionStatus.CONCLUIDO);
 
-    const ar = unresolved.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "AR").length;
-    const lvcc = unresolved.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "LVCC").length;
+    const ar = unresolved.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "AR").length;
+    const lvcc = unresolved.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "LVCC").length;
     const dial = unresolved.filter(isDialInspection).length;
     const comportamental = unresolved.filter(isDesvioComportamentalInspection).length;
-    const estrutural = unresolved.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Desvio Estrutural").length;
-    const notificacao = unresolved.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Notificação").length;
-    const interdicao = unresolved.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Interdição").length;
+    const estrutural = unresolved.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "Desvio Estrutural").length;
+    const notificacao = unresolved.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "Notificação").length;
+    const interdicao = unresolved.filter((i) => getTipoLancamento(i.atividade, i.tipo) === "Interdição").length;
 
     return { ar, lvcc, dial, comportamental, estrutural, notificacao, interdicao };
   }, [filteredInspections]);
@@ -997,7 +955,7 @@ export default function DashboardView({
     };
 
     filteredInspections.forEach((i) => {
-      const type = getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento);
+      const type = getTipoLancamento(i.atividade, i.tipo);
       if (counts[type] !== undefined) {
         counts[type]++;
       }
@@ -1159,7 +1117,7 @@ export default function DashboardView({
                       : "text-slate-600 hover:text-slate-900 hover:bg-slate-200/60"
                   }`}
                 >
-                  Todos os Contratos
+                  Todos
                 </button>
               )}
               {permittedGruposContrato.includes("vale") && (
@@ -1404,33 +1362,29 @@ export default function DashboardView({
               </span>
             </div>
             
-            {grupoContrato === "todos" ? (
-              <div className="space-y-4">
-                {(["vale", "vli"] as const).map((group) => {
-                  const summary = contractGoalSummaries[group];
-                  return (
-                    <div key={group} className="rounded-lg border border-slate-100 p-3 bg-slate-50/60">
-                      <div className="flex items-center justify-between text-xs mb-2">
-                        <span className="font-black uppercase text-[#0B2E59]">{group === "vale" ? "Vale" : "VLI"}</span>
-                        <span className="font-black text-gray-900">{summary.weeklyDone}/{summary.weeklyTarget} • {summary.weeklyPercentage}%</span>
+            <div className="space-y-4">
+              {targets.contractBreakdowns ? (
+                <div className="space-y-3">
+                  {targets.contractBreakdowns.map((item) => (
+                    <div key={item.group} className="rounded-lg border border-slate-100 bg-slate-50 p-3 space-y-2">
+                      <div className="flex justify-between text-xs font-black uppercase">
+                        <span className={item.group === "vale" ? "text-emerald-700" : "text-[#F58220]"}>{item.group}</span>
+                        <span>{item.weeklyDone}/{item.weeklyTarget} • {item.weeklyPercentage}%</span>
                       </div>
-                      <div className="w-full bg-slate-200 h-3 rounded-lg overflow-hidden">
-                        <div className="bg-[#F58220] h-full transition-all duration-500" style={{ width: `${summary.weeklyPercentage}%` }} />
+                      <div className="h-3 rounded-full overflow-hidden bg-white">
+                        <div className={item.group === "vale" ? "h-full bg-emerald-600" : "h-full bg-[#F58220]"} style={{ width: `${item.weeklyPercentage}%` }} />
                       </div>
                     </div>
-                  );
-                })}
-                <p className="text-[10px] text-slate-400 font-bold uppercase text-center">Metas calculadas separadamente por contrato</p>
-              </div>
-            ) : (
-            <div className="space-y-4">
-              <div className="flex justify-between items-center text-xs">
-                <span className="font-bold text-gray-500">Progresso Geral:</span>
-                <span className="font-black text-gray-900">{targets.totalWeeklyAchieved} / {targets.totalWeeklyTarget} Atividades</span>
-              </div>
-              
-              {/* Progress Bar Display */}
-              <div className="space-y-1.5">
+                  ))}
+                </div>
+              ) : <>
+                <div className="flex justify-between items-center text-xs">
+                  <span className="font-bold text-gray-500">Progresso Geral:</span>
+                  <span className="font-black text-gray-900">{targets.totalWeeklyAchieved} / {targets.totalWeeklyTarget} Atividades</span>
+                </div>
+
+                {/* Progress Bar Display */}
+                <div className="space-y-1.5">
                 <div className="w-full bg-slate-100 h-4 rounded-lg overflow-hidden flex relative items-center">
                   <div 
                     style={{ width: `${targets.weeklyPercentage}%` }} 
@@ -1447,10 +1401,11 @@ export default function DashboardView({
                   </span>
                   <span>{targets.totalWeeklyAchieved}/{targets.totalWeeklyTarget}</span>
                 </div>
-              </div>
+                </div>
+              </>}
 
               {/* Itemized Status with Modern Block Progress for each activity */}
-              <div className="pt-2 border-t border-slate-50 space-y-2.5">
+              {!targets.contractBreakdowns && <div className="pt-2 border-t border-slate-50 space-y-2.5">
                 {targets.isQuantitativeGoal ? (
                   <p className="text-[11px] text-slate-500 font-semibold bg-blue-50 border border-blue-100 rounded-lg p-3">
                     Meta quantitativa individual: qualquer tipo de inspeção válida conta para o objetivo semanal.
@@ -1467,13 +1422,12 @@ export default function DashboardView({
                     {renderBlockProgressRow("Interdição", "⛔", targets.interdicaoCount, targets.targetPerType)}
                   </>
                 )}
-              </div>
+              </div>}
             </div>
-            )}
           </div>
           
           <div className="mt-4 pt-2 border-t border-slate-50 text-[10px] text-gray-400 font-bold uppercase tracking-wider text-center">
-            {grupoContrato === "todos" ? "Metas Vale e VLI separadas" : `Percentual de Conformidade: ${targets.weeklyPercentage}%`}
+            Percentual de Conformidade: {targets.weeklyPercentage}%
           </div>
         </div>
 
@@ -1489,23 +1443,28 @@ export default function DashboardView({
               </span>
             </div>
 
-            {grupoContrato === "todos" ? (
+            {targets.contractBreakdowns ? (
               <div className="space-y-4 py-4">
-                {(["vale", "vli"] as const).map((group) => {
-                  const summary = contractGoalSummaries[group];
-                  return (
-                    <div key={group} className="rounded-lg border border-slate-100 p-3 bg-slate-50/60">
-                      <div className="flex items-center justify-between text-xs mb-2">
-                        <span className="font-black uppercase text-[#0B2E59]">{group === "vale" ? "Vale" : "VLI"}</span>
-                        <span className="font-black text-gray-900">{summary.monthlyDone}/{summary.monthlyTarget} • {summary.monthlyPercentage}%</span>
-                      </div>
-                      <div className="w-full bg-slate-200 h-3 rounded-lg overflow-hidden">
-                        <div className="bg-[#F58220] h-full transition-all duration-500" style={{ width: `${summary.monthlyPercentage}%` }} />
-                      </div>
+                {targets.contractBreakdowns.map((item) => (
+                  <div key={item.group} className="rounded-xl border border-slate-100 bg-slate-50 p-4 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <span className={`text-xs font-black uppercase ${item.group === "vale" ? "text-emerald-700" : "text-[#F58220]"}`}>
+                        Contrato {item.group}
+                      </span>
+                      <span className="text-xl font-black text-slate-800">{item.monthlyPercentage}%</span>
                     </div>
-                  );
-                })}
-                <p className="text-[10px] text-slate-400 font-bold uppercase text-center">Totais mensais não são somados entre contratos</p>
+                    <div className="h-3 rounded-full overflow-hidden bg-white border border-slate-100">
+                      <div
+                        className={item.group === "vale" ? "h-full bg-emerald-600" : "h-full bg-[#F58220]"}
+                        style={{ width: `${item.monthlyPercentage}%` }}
+                      />
+                    </div>
+                    <div className="flex justify-between text-[10px] font-bold text-slate-500 uppercase">
+                      <span>{item.monthlyDone} lançamentos</span>
+                      <span>Meta {item.monthlyTarget}</span>
+                    </div>
+                  </div>
+                ))}
               </div>
             ) : (
             <div className="flex flex-col items-center justify-center py-4">
@@ -1549,7 +1508,11 @@ export default function DashboardView({
           </div>
 
           <div className="pt-2 border-t border-slate-50 text-[10px] text-gray-400 font-bold uppercase tracking-wider text-center">
-            {grupoContrato === "todos" ? "Metas mensais Vale e VLI separadas" : (targets.monthlyTotalCount >= targets.monthlyTarget ? "🎉 Meta Mensal Atingida!" : "🚀 Lançamentos ativos na base")}
+            {targets.contractBreakdowns
+              ? "Metas Vale e VLI calculadas separadamente"
+              : targets.monthlyTotalCount >= targets.monthlyTarget
+                ? "🎉 Meta Mensal Atingida!"
+                : "🚀 Lançamentos ativos na base"}
           </div>
         </div>
 
@@ -1756,7 +1719,7 @@ export default function DashboardView({
               {last10Inspections.map((i) => {
                 const timeStr = i.createdAt ? new Date(i.createdAt).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" }) : "12:00";
                 const supShortName = supervisors.find(s => s.id === i.supervisorId)?.nome.split(" ")[0] || dbService.getDeletedNames()[i.supervisorId]?.split(" ")[0] || "Outros";
-                const typeStr = getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento);
+                const typeStr = getTipoLancamento(i.atividade, i.tipo);
                 const contractStr = contracts.find(c => c.id === i.contratoId)?.nome || "Geral";
 
                 return (
@@ -2423,13 +2386,13 @@ export default function DashboardView({
                       {hasInspections && (
                         <div className="flex gap-0.5 justify-center mt-auto">
                           {dayInspections.slice(0, 3).map((insp, i) => {
-                            const conf = TIPO_LANCAMENTO_CONFIG[getTipoLancamento(insp.atividade, insp.tipo, insp.tipoLancamento)];
+                            const conf = TIPO_LANCAMENTO_CONFIG[getTipoLancamento(insp.atividade, insp.tipo)];
                             return (
                               <span
                                 key={i}
                                 className="w-1.5 h-1.5 rounded-full"
                                 style={{ backgroundColor: conf?.color || "#f97316" }}
-                                title={getTipoLancamento(insp.atividade, insp.tipo, insp.tipoLancamento)}
+                                title={getTipoLancamento(insp.atividade, insp.tipo)}
                               />
                             );
                           })}
@@ -2475,7 +2438,7 @@ export default function DashboardView({
                 const sup = supervisors.find((s) => s.id === insp.supervisorId)?.nome || dbService.getDeletedNames()[insp.supervisorId] || "Desconhecido";
                 const area = areas.find((a) => a.id === insp.areaId)?.nome || dbService.getDeletedNames()[insp.areaId] || "Desconhecido";
                 const contract = contracts.find((c) => c.id === insp.contratoId) || (dbService.getDeletedNames()[insp.contratoId] ? { id: insp.contratoId, codigo: dbService.getDeletedNames()[insp.contratoId], nome: dbService.getDeletedNames()[insp.contratoId], ativo: false } : undefined);
-                const typeName = getTipoLancamento(insp.atividade, insp.tipo, insp.tipoLancamento);
+                const typeName = getTipoLancamento(insp.atividade, insp.tipo);
                 const typeConf = TIPO_LANCAMENTO_CONFIG[typeName];
 
                 return (
@@ -2624,14 +2587,13 @@ export default function DashboardView({
           inspections={filteredInspections}
           supervisors={supervisors}
           areas={areas}
+          contracts={contracts}
           selectedSupervisorId={selectedSupervisorId}
           isDashboardFiltered={isDashboardFiltered}
           selectedMonth={activeMonth}
           onSelectMonth={handleMonthChange}
           grupoContrato={grupoContrato}
           onSelectGrupoContrato={onSelectGrupoContrato}
-          permittedGruposContrato={permittedGruposContrato}
-          contracts={contracts}
         />
       </div>
     </div>

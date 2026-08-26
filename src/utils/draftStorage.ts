@@ -42,6 +42,35 @@ function getDraftKey(userId: string, isEditingId?: string): string {
   return `draft_${cleanUser}_new`;
 }
 
+function makeRecord(userId: string, draft: InspectionDraft, isEditingId?: string) {
+  const draftKey = getDraftKey(userId, isEditingId);
+  return {
+    draftKey,
+    userId,
+    isEditingId: isEditingId || null,
+    draft: { ...draft, savedAt: new Date().toISOString() }
+  };
+}
+
+function mirrorToLocalStorage(record: ReturnType<typeof makeRecord>): void {
+  try {
+    if (typeof window !== "undefined" && window.localStorage) {
+      window.localStorage.setItem(`gemba_draft_${record.draftKey}`, JSON.stringify(record));
+    }
+  } catch (err) {
+    console.warn("Falha ao salvar espelho local do rascunho:", err);
+  }
+}
+
+/** Salvamento síncrono para pagehide/visibilitychange. */
+export function saveInspectionDraftSync(
+  userId: string,
+  draft: InspectionDraft,
+  isEditingId?: string
+): void {
+  mirrorToLocalStorage(makeRecord(userId, draft, isEditingId));
+}
+
 /**
  * Salva o rascunho de uma inspeção em IndexedDB com fallback para LocalStorage.
  */
@@ -50,16 +79,11 @@ export async function saveInspectionDraft(
   draft: InspectionDraft,
   isEditingId?: string
 ): Promise<void> {
-  const draftKey = getDraftKey(userId, isEditingId);
-  const record = {
-    draftKey,
-    userId,
-    isEditingId: isEditingId || null,
-    draft: {
-      ...draft,
-      savedAt: new Date().toISOString()
-    }
-  };
+  const record = makeRecord(userId, draft, isEditingId);
+
+  // O espelho síncrono protege o formulário mesmo se a aba for fechada antes
+  // da transação assíncrona do IndexedDB terminar.
+  mirrorToLocalStorage(record);
 
   try {
     const db = await openDB();
@@ -72,14 +96,7 @@ export async function saveInspectionDraft(
       request.onerror = () => reject(request.error);
     });
   } catch (err) {
-    // Fallback para localStorage
-    try {
-      if (typeof window !== "undefined" && window.localStorage) {
-        window.localStorage.setItem(`gemba_draft_${draftKey}`, JSON.stringify(record));
-      }
-    } catch (lsErr) {
-      console.warn("Falha ao salvar rascunho em LocalStorage fallback:", lsErr);
-    }
+    // O espelho no localStorage já foi gravado antes da tentativa no IndexedDB.
   }
 }
 
@@ -107,20 +124,19 @@ export async function getInspectionDraft(
       return result.draft as InspectionDraft;
     }
   } catch (err) {
-    // Fallback para localStorage
-    try {
-      if (typeof window !== "undefined" && window.localStorage) {
-        const raw = window.localStorage.getItem(`gemba_draft_${draftKey}`);
-        if (raw) {
-          const parsed = JSON.parse(raw);
-          if (parsed && parsed.draft) {
-            return parsed.draft as InspectionDraft;
-          }
-        }
+    // Continua para o espelho no localStorage.
+  }
+
+  try {
+    if (typeof window !== "undefined" && window.localStorage) {
+      const raw = window.localStorage.getItem(`gemba_draft_${draftKey}`);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && parsed.draft) return parsed.draft as InspectionDraft;
       }
-    } catch (lsErr) {
-      console.warn("Falha ao ler rascunho de LocalStorage fallback:", lsErr);
     }
+  } catch (lsErr) {
+    console.warn("Falha ao ler rascunho de LocalStorage fallback:", lsErr);
   }
 
   return null;

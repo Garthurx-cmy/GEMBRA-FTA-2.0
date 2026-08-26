@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { auth } from "../services/firebase";
 import { isOperationalRole } from "../utils/supervisors";
 import {
@@ -15,6 +15,7 @@ import {
   Contract,
   SystemConfig,
   UserProfile,
+  InspectionDraft,
   getTipoLancamento,
   TIPO_LANCAMENTO_CONFIG,
   GrupoContrato
@@ -37,6 +38,7 @@ import {
 import { convertHeicFileToJpegDataUrl } from "../utils/heicHelper";
 import {
   saveInspectionDraft,
+  saveInspectionDraftSync,
   getInspectionDraft,
   deleteInspectionDraft
 } from "../utils/draftStorage";
@@ -151,10 +153,18 @@ export default function LancarInspecaoView({
   const [compressingStatus, setCompressingStatus] = useState("");
   const [draftRestored, setDraftRestored] = useState(false);
   const [lastSavedDraftTime, setLastSavedDraftTime] = useState<string | null>(null);
+  const initializedFormKeyRef = useRef<string | null>(null);
+  const latestDraftRef = useRef<InspectionDraft | null>(null);
 
   // Load editing inspection data if provided, or restore draft for new inspection
   useEffect(() => {
     let isCancelled = false;
+    const userId = currentUser?.id || "anon";
+    const formKey = editingInspection ? `edit:${editingInspection.id}` : `new:${userId}`;
+    if (initializedFormKeyRef.current === formKey) return;
+
+    // Aguarda os diretórios globais carregarem para não fixar área/contrato vazios.
+    if (!editingInspection && (areas.length === 0 || contracts.length === 0)) return;
 
     if (editingInspection) {
       const initialTipo = editingInspection.tipoLancamento || getTipoLancamento(editingInspection.atividade, editingInspection.tipo, editingInspection.tipoLancamento);
@@ -176,12 +186,12 @@ export default function LancarInspecaoView({
       setTemaDSS(editingInspection.temaDSS || "");
       setQuantidadeParticipantes(editingInspection.quantidadeParticipantes ?? "");
       setDataConclusao(editingInspection.dataConclusao || "");
+      initializedFormKeyRef.current = formKey;
     } else {
       // Check for saved local draft first
-      const userId = currentUser?.id || "anon";
       getInspectionDraft(userId).then((draft) => {
         if (isCancelled) return;
-        if (draft && (draft.descricao || draft.temaDSS || draft.acaoCorretiva || draft.fotosAntes?.length || draft.observacoes)) {
+        if (draft) {
           setData(draft.data || new Date().toISOString().split("T")[0]);
           setSupervisorId(draft.supervisorId || "");
           setAreaId(draft.areaId || areas[0]?.id || "");
@@ -236,6 +246,7 @@ export default function LancarInspecaoView({
           setQuantidadeParticipantes("");
           setDataConclusao("");
         }
+        initializedFormKeyRef.current = formKey;
       });
     }
 
@@ -253,7 +264,7 @@ export default function LancarInspecaoView({
 
     const timer = setTimeout(() => {
       const grupoContrato = getGrupoContratoPorLocalidade(areaId, areas, contracts);
-      saveInspectionDraft(userId, {
+      const draft: InspectionDraft = {
         data,
         supervisorId,
         areaId,
@@ -272,9 +283,11 @@ export default function LancarInspecaoView({
         fotosAntes,
         fotosDepois,
         temaDSS,
-        quantidadeParticipantes: quantidadeParticipantes === "" ? undefined : Number(quantidadeParticipantes),
+        quantidadeParticipantes: quantidadeParticipantes === "" ? null : Number(quantidadeParticipantes),
         dataConclusao
-      }).then(() => {
+      };
+      latestDraftRef.current = draft;
+      saveInspectionDraft(userId, draft).then(() => {
         const now = new Date();
         setLastSavedDraftTime(`${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}:${String(now.getSeconds()).padStart(2, "0")}`);
       });
@@ -287,6 +300,25 @@ export default function LancarInspecaoView({
     fotosAntes, fotosDepois, temaDSS, quantidadeParticipantes, dataConclusao,
     editingInspection, currentUser?.id
   ]);
+
+  useEffect(() => {
+    if (editingInspection) return;
+    const persistNow = () => {
+      if (latestDraftRef.current) {
+        saveInspectionDraftSync(currentUser?.id || "anon", latestDraftRef.current);
+      }
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") persistNow();
+    };
+    window.addEventListener("pagehide", persistNow);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      persistNow();
+      window.removeEventListener("pagehide", persistNow);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [editingInspection, currentUser?.id]);
 
   const handleDiscardDraft = async () => {
     const userId = currentUser?.id || "anon";
@@ -457,8 +489,8 @@ export default function LancarInspecaoView({
       observacoes: observacoes || null,
       fotosAntes,
       fotosDepois: (isDSS || isPresenca) ? [] : fotosDepois,
-      rotacoesFotosAntes: editingInspection?.rotacoesFotosAntes,
-      rotacoesFotosDepois: editingInspection?.rotacoesFotosDepois,
+      rotacoesFotosAntes: editingInspection?.rotacoesFotosAntes || [],
+      rotacoesFotosDepois: editingInspection?.rotacoesFotosDepois || [],
       armazenamentoFotos: "firestore-inline",
       temaDSS: isDSS ? temaDSS : null,
       quantidadeParticipantes: (isDSS || isPresenca) ? Number(quantidadeParticipantes) : null,

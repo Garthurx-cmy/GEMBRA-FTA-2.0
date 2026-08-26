@@ -50,27 +50,27 @@ export function getGrupoContratoPorLocalidade(
   localidade: string | Area | undefined | null,
   areas: Area[] = [],
   contracts: Contract[] = []
-): GrupoContrato | undefined {
-  if (!localidade) return undefined;
+): GrupoContrato {
+  if (!localidade) return "vale";
 
-  // Área conhecida: Vale somente quando explicitamente Vale; as demais
-  // localidades operacionais cadastradas pertencem à VLI.
+  // Se for um objeto Area
   if (typeof localidade === "object") {
     if (localidade.grupoContrato === "vli" || localidade.grupoContrato === "vale") {
       return localidade.grupoContrato;
     }
     const name = normalizeName(localidade.nome || "");
-    if (!name) return undefined;
     if (name.includes("andaime vale") || name.includes("sucateamento vale") || name.includes("vale")) {
       return "vale";
     }
-    return "vli";
+    if (name.includes("vli") || name.includes("fca") || name.includes("terminal") || name.includes("patio")) {
+      return "vli";
+    }
+    return "vale";
   }
 
   const str = String(localidade).trim();
-  if (!str) return undefined;
-
-  // Área operacional cadastrada.
+  
+  // Verificar se é ID de uma Area existente
   const matchedArea = areas.find(a => a.id === str || normalizeName(a.nome) === normalizeName(str));
   if (matchedArea) {
     if (matchedArea.grupoContrato === "vli" || matchedArea.grupoContrato === "vale") {
@@ -80,10 +80,12 @@ export function getGrupoContratoPorLocalidade(
     if (areaName.includes("andaime vale") || areaName.includes("sucateamento vale") || areaName.includes("vale")) {
       return "vale";
     }
-    return "vli";
+    if (areaName.includes("vli") || areaName.includes("fca") || areaName.includes("terminal") || areaName.includes("patio")) {
+      return "vli";
+    }
   }
 
-  // Contrato operacional cadastrado.
+  // Verificar se é ID de um Contrato existente
   const matchedContract = contracts.find(c => c.id === str || normalizeName(c.nome) === normalizeName(str) || normalizeName(c.codigo) === normalizeName(str));
   if (matchedContract) {
     if (matchedContract.grupoContrato === "vli" || matchedContract.grupoContrato === "vale") {
@@ -93,15 +95,20 @@ export function getGrupoContratoPorLocalidade(
     if (ctrName.includes("andaime vale") || ctrName.includes("sucateamento vale") || ctrName.includes("vale")) {
       return "vale";
     }
+    if (ctrName.includes("vli") || ctrName.includes("fca")) {
+      return "vli";
+    }
+  }
+
+  const norm = normalizeName(str);
+  if (norm.includes("andaime vale") || norm.includes("sucateamento vale") || norm.includes("vale")) {
+    return "vale";
+  }
+  if (norm.includes("vli") || norm.includes("fca") || norm.includes("terminal") || norm.includes("patio")) {
     return "vli";
   }
 
-  // Fallback legado por nome: só classifica quando há evidência suficiente.
-  const norm = normalizeName(str);
-  if (norm.includes("andaime vale") || norm.includes("sucateamento vale") || norm.includes("vale")) return "vale";
-  if (norm.includes("vli") || norm.includes("fca") || norm.includes("terminal") || norm.includes("patio")) return "vli";
-
-  return undefined;
+  return "vale";
 }
 
 /**
@@ -113,8 +120,8 @@ export function getInspectionGrupoContrato(
   contracts: Contract[] = [],
   supervisors: Supervisor[] = [],
   deletedNames: Record<string, string> = {}
-): GrupoContrato | "nao_classificado" {
-  if (!inspection) return "nao_classificado";
+): GrupoContrato {
+  if (!inspection) return "vale";
 
   // 1. Campo explícito no documento
   if (inspection.grupoContrato === "vli" || inspection.grupoContrato === "vale") {
@@ -125,13 +132,11 @@ export function getInspectionGrupoContrato(
   if (inspection.areaId) {
     const area = areas.find(a => a.id === inspection.areaId);
     if (area) {
-      return getGrupoContratoPorLocalidade(area, areas, contracts) ?? "nao_classificado";
+      return getGrupoContratoPorLocalidade(area, areas, contracts);
     }
     const deletedAreaName = deletedNames[inspection.areaId];
     if (deletedAreaName) {
-      const deletedNorm = normalizeName(deletedAreaName);
-      if (deletedNorm.includes("andaime vale") || deletedNorm.includes("sucateamento vale") || deletedNorm.includes("vale")) return "vale";
-      return "vli";
+      return getGrupoContratoPorLocalidade(deletedAreaName, areas, contracts);
     }
   }
 
@@ -163,7 +168,7 @@ export function getInspectionGrupoContrato(
     }
   }
 
-  return "nao_classificado";
+  return "vale";
 }
 
 /**
@@ -175,14 +180,15 @@ export function isSupervisorFromGrupoContrato(
 ): boolean {
   if (!supervisor) return false;
 
-  // 1. Grupos permitidos explícitos
-  if (supervisor.gruposContratoPermitidos && supervisor.gruposContratoPermitidos.length > 0) {
-    return supervisor.gruposContratoPermitidos.includes(grupo);
-  }
-
-  // 2. Grupo direto no documento
+  // 1. Grupo operacional principal no diretório. Este campo representa
+  // a equipe/meta; gruposContratoPermitidos representa somente acesso.
   if (supervisor.grupoContrato === "vli" || supervisor.grupoContrato === "vale") {
     return supervisor.grupoContrato === grupo;
+  }
+
+  // 2. Compatibilidade com documentos sem grupo principal.
+  if (supervisor.gruposContratoPermitidos && supervisor.gruposContratoPermitidos.length > 0) {
+    return supervisor.gruposContratoPermitidos.includes(grupo);
   }
 
   // 3. Unidade
@@ -294,5 +300,4 @@ export function getSupervisorMetaMensal(sup: Supervisor): number {
   if (sup.metaMensal !== undefined) return sup.metaMensal;
   return getSupervisorTargets(sup).monthly;
 }
-
 

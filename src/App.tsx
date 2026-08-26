@@ -9,7 +9,7 @@ import { onAuthStateChanged, signInWithEmailAndPassword, signOut, setPersistence
 import { doc, getDoc, onSnapshot, updateDoc as fbUpdateDoc, serverTimestamp } from "firebase/firestore";
 
 const updateDoc = async (ref: any, data: any) => {
-  if (import.meta.env.DEV) {
+  if (process.env.NODE_ENV !== "production") {
     const path = ref && typeof ref.path === "string" ? ref.path : "unknown-path";
     console.trace("[FIRESTORE WRITE]", path, "updateDoc", data);
   }
@@ -99,11 +99,13 @@ export default function App() {
   const [grupoContratoSelecionado, setGrupoContratoSelecionadoState] = useState<GrupoContratoFiltro>("todos");
 
   const permittedGruposContrato: GrupoContrato[] = useMemo(() => {
-    if (!currentUser) return ["vale", "vli"];
+    if (!currentUser) return [];
     if (currentUser.gruposContratoPermitidos && currentUser.gruposContratoPermitidos.length > 0) {
       return currentUser.gruposContratoPermitidos;
     }
-    return ["vale", "vli"];
+    return ["Desenvolvedor/Admin", "Administrador", "Gestor"].includes(currentUser.perfil)
+      ? ["vale", "vli"]
+      : ["vale"];
   }, [currentUser]);
 
   // Sync default or stored preference when currentUser changes
@@ -126,11 +128,6 @@ export default function App() {
   }, [currentUser?.id, permittedGruposContrato]);
 
   const setGrupoContratoSelecionado = (novoGrupo: GrupoContratoFiltro) => {
-    const permitido = novoGrupo === "todos"
-      ? permittedGruposContrato.length > 1
-      : permittedGruposContrato.includes(novoGrupo);
-    if (!permitido) return;
-
     if (currentUser) {
       const storageKey = `gemba_selected_contract_${currentUser.id}`;
       try {
@@ -154,7 +151,7 @@ export default function App() {
       const contractCode = contract ? contract.codigo : "";
       const contractName = contract ? contract.nome : "";
       const area = areas.find((a) => a.id === insp.areaId)?.nome || dbService.getDeletedNames()[insp.areaId] || "";
-      const typeName = getTipoLancamento(insp.atividade, insp.tipo, insp.tipoLancamento);
+      const typeName = getTipoLancamento(insp.atividade, insp.tipo);
       
       return (
         insp.id.toLowerCase().includes(term) ||
@@ -1003,7 +1000,7 @@ export default function App() {
             {globalSearchResults.length > 0 && (
               <div className="absolute left-0 right-0 mt-1.5 bg-white border border-slate-200 rounded-xl shadow-xl z-50 max-h-60 overflow-y-auto divide-y divide-slate-100 font-medium">
                 {globalSearchResults.map((insp) => {
-                  const typeName = getTipoLancamento(insp.atividade, insp.tipo, insp.tipoLancamento);
+                  const typeName = getTipoLancamento(insp.atividade, insp.tipo);
                   const conf = TIPO_LANCAMENTO_CONFIG[typeName];
                   const sup = resolveSupervisorName(insp.supervisorId, unifiedSupervisors, users, currentUser, dbService.getDeletedNames());
 
@@ -1330,7 +1327,7 @@ export default function App() {
               {/* Categorization indicators */}
               <div className="flex flex-wrap gap-2 text-xs font-bold">
                 {(() => {
-                  const typeName = getTipoLancamento(viewingGlobalInspection.atividade, viewingGlobalInspection.tipo, viewingGlobalInspection.tipoLancamento);
+                  const typeName = getTipoLancamento(viewingGlobalInspection.atividade, viewingGlobalInspection.tipo);
                   const conf = TIPO_LANCAMENTO_CONFIG[typeName];
                   return (
                     <span className={`px-2.5 py-1 rounded border flex items-center gap-1 ${conf ? `${conf.bgClass} ${conf.textClass} ${conf.borderClass}` : "bg-gray-100 text-gray-800 border-gray-200"}`}>

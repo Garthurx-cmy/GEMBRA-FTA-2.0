@@ -166,5 +166,5 @@ export function getUniqueMonthlyInspections(
 
 export function getCanonicalInspectionCategory(inspection: Inspection): string {
   if (!inspection) return "Outros";
-  return getTipoLancamento(inspection.atividade, inspection.tipo, inspection.tipoLancamento);
+  return getTipoLancamento(inspection.atividade, inspection.tipo);
 }

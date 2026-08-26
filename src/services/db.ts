@@ -98,21 +98,48 @@ const onSnapshot = (ref: any, ...args: any[]) => {
   };
 };
 
+// Firestore rejects `undefined` anywhere inside a document. Optional form fields
+// are therefore normalized before every write. Non-plain objects (for example
+// Firestore FieldValue sentinels such as serverTimestamp/deleteField) are kept intact.
+const sanitizeFirestoreData = (value: any): any => {
+  if (Array.isArray(value)) {
+    return value
+      .filter((item) => item !== undefined)
+      .map((item) => sanitizeFirestoreData(item));
+  }
+
+  if (value !== null && typeof value === "object") {
+    const prototype = Object.getPrototypeOf(value);
+    const isPlainObject = prototype === Object.prototype || prototype === null;
+    if (!isPlainObject) return value;
+
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([, fieldValue]) => fieldValue !== undefined)
+        .map(([key, fieldValue]) => [key, sanitizeFirestoreData(fieldValue)])
+    );
+  }
+
+  return value;
+};
+
 // Trace helper for writes in development
 const setDoc = async (ref: any, data: any, options?: any) => {
+  const safeData = sanitizeFirestoreData(data);
   if (import.meta.env.DEV) {
     const path = ref && typeof ref.path === "string" ? ref.path : "unknown-path";
-    console.trace("[FIRESTORE WRITE]", path, "setDoc", data);
+    console.trace("[FIRESTORE WRITE]", path, "setDoc", safeData);
   }
-  return fbSetDoc(ref, data, options);
+  return fbSetDoc(ref, safeData, options);
 };
 
 const updateDoc = async (ref: any, data: any) => {
+  const safeData = sanitizeFirestoreData(data);
   if (import.meta.env.DEV) {
     const path = ref && typeof ref.path === "string" ? ref.path : "unknown-path";
-    console.trace("[FIRESTORE WRITE]", path, "updateDoc", data);
+    console.trace("[FIRESTORE WRITE]", path, "updateDoc", safeData);
   }
-  return fbUpdateDoc(ref, data);
+  return fbUpdateDoc(ref, safeData);
 };
 
 const deleteDoc = async (ref: any) => {
@@ -873,6 +900,8 @@ class DBService {
       ...inspection,
       fotosAntes: inspection.fotosAntes || [],
       fotosDepois: inspection.fotosDepois || [],
+      rotacoesFotosAntes: inspection.rotacoesFotosAntes || [],
+      rotacoesFotosDepois: inspection.rotacoesFotosDepois || [],
       createdAt: inspection.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       atualizadoEm: serverTimestamp()

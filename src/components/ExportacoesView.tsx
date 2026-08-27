@@ -5,6 +5,9 @@
 
 import React, { useState } from "react";
 import { dbService } from "../services/db";
+import { supervisorMatchesId } from "../utils/supervisors";
+import { getEffectiveMonthKey, getInspectionMonthKey } from "../utils/inspectionUtils";
+import { useOperationalDate } from "../utils/useOperationalDate";
 import { Inspection, Supervisor, Area } from "../types";
 import { Download, FileSpreadsheet, FileText, Printer, CheckCircle, Search, Calendar } from "lucide-react";
 
@@ -21,10 +24,12 @@ export default function ExportacoesView({
   areas,
   onSelectInspectionReport
 }: ExportacoesViewProps) {
-  const [selectedMonth, setSelectedMonth] = useState("2026-07");
+  const [selectedMonth, setSelectedMonth] = useState("auto");
+  const operationalToday = useOperationalDate();
+  const effectiveMonthKey = getEffectiveMonthKey(selectedMonth, operationalToday);
   const [successMsg, setSuccessMsg] = useState("");
 
-  const getSupervisorName = (id: string) => supervisors.find((s) => s.id === id)?.nome || dbService.getDeletedNames()[id] || "Outros";
+  const getSupervisorName = (id: string) => supervisors.find((s) => supervisorMatchesId(s, id))?.nome || dbService.getDeletedNames()[id] || "Outros";
   const getAreaName = (id: string) => areas.find((a) => a.id === id)?.nome || dbService.getDeletedNames()[id] || "Outros";
 
   // Export to Excel (CSV format)
@@ -53,8 +58,8 @@ export default function ExportacoesView({
       item.atividade,
       item.tipo,
       item.potencial,
-      `"${item.descricao.replace(/"/g, '""')}"`,
-      `"${item.acaoCorretiva.replace(/"/g, '""')}"`,
+      `"${(item.descricao || "").replace(/"/g, '""')}"`,
+      `"${(item.acaoCorretiva || "").replace(/"/g, '""')}"`,
       item.responsavel,
       item.prazo,
       item.status
@@ -146,7 +151,7 @@ export default function ExportacoesView({
               </label>
               <input
                 type="month"
-                value={selectedMonth}
+                value={effectiveMonthKey}
                 onChange={(e) => setSelectedMonth(e.target.value)}
                 className="bg-gray-50 border border-gray-200 rounded-lg p-2 text-gray-700 focus:ring-1 focus:ring-[#0B2E59] focus:outline-none"
               />
@@ -155,7 +160,7 @@ export default function ExportacoesView({
             <button
               onClick={() => {
                 // Find first inspection in that month to show
-                const monthMatches = inspections.filter((i) => i.data.startsWith(selectedMonth));
+                const monthMatches = inspections.filter((i) => getInspectionMonthKey(i) === effectiveMonthKey);
                 if (monthMatches.length > 0) {
                   onSelectInspectionReport(monthMatches[0].id);
                 } else {

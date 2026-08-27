@@ -89,14 +89,13 @@ export function getInspectionMonthKey(inspectionOrDate: any): string | null {
   return dateStr.substring(0, 7); // YYYY-MM
 }
 
-export function getEffectiveMonthKey(selectedMonth: string): string {
-  if (!selectedMonth || selectedMonth === "auto" || selectedMonth === "all_months") {
-    const now = new Date();
-    const y = now.getFullYear();
-    const m = String(now.getMonth() + 1).padStart(2, "0");
-    return `${y}-${m}`;
-  }
-  return selectedMonth;
+export function getOperationalDateKey(now: Date = new Date()): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Sao_Paulo", year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
+}
+
+export function getEffectiveMonthKey(selectedMonth: string, today = getOperationalDateKey()): string {
+  return !selectedMonth || selectedMonth === "auto" || selectedMonth === "all_months"
+    ? today.slice(0, 7) : selectedMonth;
 }
 
 export const MONTH_NAMES_PT = [
@@ -105,7 +104,7 @@ export const MONTH_NAMES_PT = [
 ];
 
 export function getMonthOptions(inspections?: Inspection[]) {
-  const currentYear = new Date().getFullYear();
+  const currentYear = Number(getOperationalDateKey().slice(0,4));
   const options: { value: string; label: string }[] = [
     { value: "auto", label: "Automático / Mês atual" }
   ];

@@ -1,0 +1,11 @@
+import { auth } from "./firebaseMock";
+export const onAuthStateChanged = (_auth: any, next: any) => { const id=setTimeout(()=>next(auth.currentUser),0);return ()=>clearTimeout(id); };
+export const signInWithEmailAndPassword = async () => {};
+export const signOut = async () => {};
+export const setPersistence = async () => {};
+export const browserLocalPersistence = {};
+export const browserSessionPersistence = {};
+export const sendPasswordResetEmail = async () => {};
+export const updatePassword = async () => {};
+export const getAuth = () => auth;
+export const createUserWithEmailAndPassword = async () => ({user:auth.currentUser});

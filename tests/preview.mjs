@@ -1,0 +1,10 @@
+import {build} from 'esbuild';
+import {mockPlugin} from './mockPlugin.mjs';
+import {mkdir,readdir,readFile,copyFile,writeFile} from 'node:fs/promises';
+import {createServer} from 'node:http';
+import path from 'node:path';
+const root=path.resolve('../qa-preview');await mkdir(root,{recursive:true});
+await build({entryPoints:['tests/preview.tsx'],outfile:path.join(root,'app.js'),bundle:true,format:'esm',platform:'browser',define:{'import.meta.env.DEV':'false','process.env.NODE_ENV':'"production"'},plugins:[mockPlugin],logLevel:'warning'});
+const css=(await readdir('dist/assets')).find(x=>x.endsWith('.css'));await copyFile('dist/assets/'+css,path.join(root,'app.css'));await copyFile('public/logo-fta.png',path.join(root,'logo-fta.png'));
+await writeFile(path.join(root,'index.html'),'<!doctype html><html lang="pt-BR"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GEMBA — TESTE LOCAL</title><link rel="stylesheet" href="/app.css"><div id="root"></div><script type="module" src="/app.js"></script></html>');
+createServer(async(req,res)=>{try{const filename=req.url==='/'?'index.html':req.url.slice(1).split('?')[0];if(filename.includes('..'))throw Error();const buffer=await readFile(path.join(root,filename));res.setHeader('Content-Type',filename.endsWith('.js')?'text/javascript':filename.endsWith('.css')?'text/css':filename.endsWith('.png')?'image/png':'text/html');res.end(buffer);}catch{res.writeHead(404).end();}}).listen(4175,'0.0.0.0',()=>console.log('Isolated test UI listening on 4175 (no Firebase access).'));

@@ -1,3 +1,5 @@
+import { useOperationalDate } from "../utils/useOperationalDate";
+import { inspectionBelongsToSupervisor, resolveInspectionSupervisor, supervisorMatchesId } from "../utils/supervisors";
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
@@ -82,6 +84,7 @@ export default function RankingView({
 
   const [localMonth, setLocalMonth] = useState<string>("auto");
   const activeMonth = propSelectedMonth !== undefined ? propSelectedMonth : localMonth;
+  const operationalToday = useOperationalDate();
 
   // Local contract filter if onSelectGrupoContrato is not used
   const [localContractFilter, setLocalContractFilter] = useState<GrupoContratoFiltro>("todos");
@@ -103,7 +106,7 @@ export default function RankingView({
     }
   };
 
-  const deletedNames = useMemo(() => dbService.getDeletedNames(), []);
+  const deletedNames = dbService.getDeletedNames();
 
   // Lista unificada de responsáveis operacionais (supervisores ativos + usuários ativos com perfil operacional)
   const unifiedList = useMemo(() => {
@@ -114,7 +117,7 @@ export default function RankingView({
 
   // Compute monthly inspections filtered by contract group
   const monthlyInspections = useMemo(() => {
-    const rawMonthly = getUniqueMonthlyInspections(inspections, activeMonth);
+    const rawMonthly = getUniqueMonthlyInspections(inspections, getEffectiveMonthKey(activeMonth, operationalToday));
     if (effectiveContract === "todos") {
       return rawMonthly;
     }
@@ -122,7 +125,7 @@ export default function RankingView({
       const group = getInspectionGrupoContrato(item, areas, contracts, unifiedList, deletedNames);
       return group === effectiveContract;
     });
-  }, [inspections, activeMonth, effectiveContract, areas, contracts, unifiedList, deletedNames]);
+  }, [inspections, operationalToday, activeMonth, effectiveContract, areas, contracts, unifiedList, deletedNames]);
 
   // Supervisors eligible for ranking based on selected contract group
   const filteredSupervisors = useMemo(() => {
@@ -133,7 +136,7 @@ export default function RankingView({
       // Direct supervisor affinity
       if (isSupervisorFromGrupoContrato(s, effectiveContract)) return true;
       // Or supervisor has recorded inspections in this contract
-      const hasInspectionsInGroup = monthlyInspections.some((i) => i.supervisorId === s.id);
+      const hasInspectionsInGroup = monthlyInspections.some((i) => inspectionBelongsToSupervisor(i, s, supervisors));
       return hasInspectionsInGroup;
     });
   }, [unifiedList, effectiveContract, monthlyInspections]);
@@ -143,17 +146,7 @@ export default function RankingView({
     return filteredSupervisors
       .map((supervisor) => {
         // Filtrar inspeções pertencentes ao período selecionado e ao ID/UID do responsável
-        const month = monthlyInspections.filter((item) => {
-          if (item.supervisorId === supervisor.id) return true;
-          if (
-            supervisor.email &&
-            item.criadoPorEmail &&
-            supervisor.email.trim().toLowerCase() === item.criadoPorEmail.trim().toLowerCase()
-          ) {
-            return true;
-          }
-          return false;
-        });
+        const month = monthlyInspections.filter(item => inspectionBelongsToSupervisor(item, supervisor, unifiedList, deletedNames));
 
         // Contagens específicas de cada tipo
         const dialCount = month.filter(isDialInspection).length;

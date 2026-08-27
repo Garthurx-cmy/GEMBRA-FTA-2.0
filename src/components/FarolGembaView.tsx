@@ -1,3 +1,6 @@
+import { dbService } from "../services/db";
+import { useOperationalDate } from "../utils/useOperationalDate";
+import { inspectionBelongsToSupervisor, resolveInspectionSupervisor, supervisorMatchesId } from "../utils/supervisors";
 import React, { useState, useMemo } from "react";
 import { CalendarDays, Radio, Trophy, Filter, HelpCircle, Building2, CheckCircle2 } from "lucide-react";
 import { Area, Contract, GrupoContrato, GrupoContratoFiltro, Inspection, Supervisor, isDialInspection, isDesvioComportamentalInspection } from "../types";
@@ -84,6 +87,7 @@ export default function FarolGembaView({
 }: FarolGembaViewProps) {
   const [localMonth, setLocalMonth] = useState<string>("auto");
   const activeMonth = propSelectedMonth !== undefined ? propSelectedMonth : localMonth;
+  const operationalToday = useOperationalDate();
 
   const handleMonthChange = (val: string) => {
     if (onSelectMonth) {
@@ -119,7 +123,7 @@ export default function FarolGembaView({
   const processSupervisorRows = (supList: Supervisor[], monthInspections: Inspection[]): SupervisorRowData[] => {
     return supList
       .map((sup) => {
-        const ownInsps = monthInspections.filter((i) => i.supervisorId === sup.id);
+        const ownInsps = monthInspections.filter((i) => inspectionBelongsToSupervisor(i, sup, supervisors));
 
         const lvcc = ownInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "LVCC").length;
         const dial = ownInsps.filter(isDialInspection).length;
@@ -132,7 +136,7 @@ export default function FarolGembaView({
 
         const totalInspecoes = ownInsps.length;
         const metaMensal = getSupervisorMetaMensal(sup);
-        const percentual = metaMensal > 0 ? (totalInspecoes / metaMensal) * 100 : 0;
+        const percentual = metaMensal > 0 ? Math.min(100, (totalInspecoes / metaMensal) * 100) : 0;
         const pontuacao = calculateInspectionScore(ownInsps);
 
         const lastTimestamp = ownInsps.reduce((latest, i) => {
@@ -170,20 +174,20 @@ export default function FarolGembaView({
   };
 
   const monthInspections = useMemo(() => {
-    return getUniqueMonthlyInspections(inspections, activeMonth);
-  }, [inspections, activeMonth]);
+    return getUniqueMonthlyInspections(inspections, getEffectiveMonthKey(activeMonth, operationalToday));
+  }, [inspections, operationalToday, activeMonth]);
 
   // Contract isolation must happen before any Farol calculation. This prevents
   // a supervisor linked to both groups from having Vale and VLI results mixed.
   const valeMonthInspections = useMemo(() => (
     monthInspections.filter((inspection) =>
-      getInspectionGrupoContrato(inspection, areas, contracts, supervisors) === "vale"
+      getInspectionGrupoContrato(inspection, areas, contracts, supervisors, dbService.getDeletedNames()) === "vale"
     )
   ), [monthInspections, areas, contracts, supervisors]);
 
   const vliMonthInspections = useMemo(() => (
     monthInspections.filter((inspection) =>
-      getInspectionGrupoContrato(inspection, areas, contracts, supervisors) === "vli"
+      getInspectionGrupoContrato(inspection, areas, contracts, supervisors, dbService.getDeletedNames()) === "vli"
     )
   ), [monthInspections, areas, contracts, supervisors]);
 
@@ -247,7 +251,7 @@ export default function FarolGembaView({
             </thead>
             <tbody className="divide-y divide-gray-100 text-xs">
               {rows.map((row, index) => {
-                const hasMetGoal = row.totalInspecoes >= row.metaMensal;
+                const hasMetGoal = row.metaMensal > 0 && row.totalInspecoes >= row.metaMensal;
                 return (
                   <tr key={row.supervisor.id} className="hover:bg-slate-50 transition-colors">
                     {/* Supervisor Name & Role Badge */}
@@ -331,8 +335,14 @@ export default function FarolGembaView({
     );
   };
 
+  const displayedMonth = monthInspections.filter(i => grupoContrato === "todos" ||
+    getInspectionGrupoContrato(i, areas, contracts, supervisors, dbService.getDeletedNames()) === grupoContrato);
+  const unresolvedCount = displayedMonth.filter(i => !resolveInspectionSupervisor(i, supervisors, dbService.getDeletedNames())).length;
   return (
     <section className="space-y-5">
+      {unresolvedCount > 0 && <div role="alert" className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+        {unresolvedCount} inspeção(ões) deste mês sem vínculo confirmado com o responsável atual. Os registros foram preservados; os totais por pessoa podem estar incompletos até conferir os cadastros.
+      </div>}
       {/* Filters & Information Panel */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 rounded-xl border border-blue-100 bg-blue-50/60 px-4 py-3">
         <div className="flex flex-col sm:flex-row sm:items-center gap-3">
@@ -404,7 +414,7 @@ export default function FarolGembaView({
         
         <div className="flex flex-col items-end gap-1.5">
           <span className="flex items-center gap-2 text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-3 py-1.5">
-            <Radio size={12} className="animate-pulse" /> Sincronização em tempo real (Firestore)
+            <Radio size={12} className="animate-pulse" /> Atualização automática com os dados recebidos
           </span>
           {isDashboardFiltered && (
             <span className="flex items-center gap-1 text-[9px] font-black uppercase tracking-wider text-[#F58220] bg-orange-50 border border-orange-100 rounded-md px-2 py-1">

@@ -16,7 +16,7 @@ const updateDoc = async (ref: any, data: any) => {
   return fbUpdateDoc(ref, data);
 };
 import { dbService, normalizeUserProfile, hasLegacyUppercaseFields } from "./services/db";
-import { buildUnifiedSupervisors, resolveSupervisorName } from "./utils/supervisors";
+import { attachHistoricalSupervisorAliases, buildUnifiedSupervisors, resolveSupervisorName } from "./utils/supervisors";
 import {
   Inspection,
   Supervisor,
@@ -69,8 +69,7 @@ export default function App() {
 
   // --- VISIBILITY & SYNC STATES ---
   const [isOnline, setIsOnline] = useState(navigator.onLine);
-  const [isVisible, setIsVisible] = useState(document.visibilityState === "visible");
-  const [isSyncing, setIsSyncing] = useState(false);
+  const [, setSyncRevision] = useState(0);
 
   // --- SPECIAL INTERACTIVE STATES ---
   const [editingInspection, setEditingInspection] = useState<Inspection | null>(null);
@@ -100,6 +99,7 @@ export default function App() {
 
   const permittedGruposContrato: GrupoContrato[] = useMemo(() => {
     if (!currentUser) return ["vale", "vli"];
+    if (["Administrador", "Desenvolvedor/Admin", "Gestor"].includes(currentUser.perfil)) return ["vale", "vli"];
     if (currentUser.gruposContratoPermitidos && currentUser.gruposContratoPermitidos.length > 0) {
       return currentUser.gruposContratoPermitidos;
     }
@@ -142,8 +142,8 @@ export default function App() {
 
   // Unified operational supervisors (collection supervisors + operational users + currentUser)
   const unifiedSupervisors = useMemo(() => {
-    return buildUnifiedSupervisors(supervisors, users, currentUser);
-  }, [supervisors, users, currentUser]);
+    return attachHistoricalSupervisorAliases(buildUnifiedSupervisors(supervisors, users, currentUser), inspections, dbService.getDeletedNames());
+  }, [supervisors, users, currentUser, inspections]);
 
   const globalSearchResults = useMemo(() => {
     const term = globalSearchTerm.trim().toLowerCase();
@@ -177,6 +177,7 @@ export default function App() {
     setUsers(dbService.getUsers());
     setConfig(dbService.getConfig());
     setNotifications(dbService.getNotifications());
+    setSyncRevision(value => value + 1);
   };
 
   useEffect(() => {
@@ -188,16 +189,13 @@ export default function App() {
   // Centralized Visibility, Online, and Tab Page event listeners
   useEffect(() => {
     const handleVisibilityChange = () => {
-      setIsVisible(document.visibilityState === "visible");
+      if (document.visibilityState === "visible") refreshDatabaseStates();
     };
 
     const handlePageShow = () => {
-      setIsVisible(true);
+      refreshDatabaseStates();
     };
 
-    const handlePageHide = () => {
-      setIsVisible(false);
-    };
 
     const handleOnline = () => {
       setIsOnline(true);
@@ -209,7 +207,6 @@ export default function App() {
 
     document.addEventListener("visibilitychange", handleVisibilityChange);
     window.addEventListener("pageshow", handlePageShow);
-    window.addEventListener("pagehide", handlePageHide);
     window.addEventListener("online", handleOnline);
     window.addEventListener("offline", handleOffline);
 
@@ -223,33 +220,29 @@ export default function App() {
     return () => {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("pageshow", handlePageShow);
-      window.removeEventListener("pagehide", handlePageHide);
       window.removeEventListener("online", handleOnline);
       window.removeEventListener("offline", handleOffline);
     };
   }, []);
 
-  // Centralized unified listener synchronization manager
+  // Visibility and network changes are handled by the SDK, without losing listeners.
+  const syncIdentity = currentUser ? JSON.stringify([currentUser.id, currentUser.perfil, currentUser.ativo,
+    [...(currentUser.gruposContratoPermitidos || [])].sort()]) : "";
   useEffect(() => {
     if (!currentUser) {
-      dbService.stopSync(true); // Logout: clear cache & cancel listeners
-      setIsSyncing(false);
+      dbService.stopSync(true);
+      refreshDatabaseStates();
       return;
     }
-
-    if (!isVisible || !isOnline) {
-      dbService.stopSync(false); // Hidden/Offline: cancel listeners, keep cache
-      setIsSyncing(false);
-      return;
-    }
-
-    // visible + online + authenticated: start global sync immediately
-    setIsSyncing(true);
     dbService.startSync(currentUser);
     refreshDatabaseStates();
-
-    setIsSyncing(false);
-  }, [currentUser?.id, isVisible, isOnline]);
+    return () => dbService.stopSync(true);
+  }, [syncIdentity]);
+  const syncState = dbService.getSyncState(currentUser);
+  const isSyncing = isOnline && !syncState.serverReady && syncState.errors.length === 0;
+  const viewDataReady = activeTab === "lancar"
+    ? syncState.supervisorsReady && syncState.areasReady && syncState.contractsReady
+    : syncState.appDataReady;
 
   // Firebase Authentication is the only session source. Firestore listeners start
   // only after authentication, avoiding permission errors on the login screen.
@@ -282,7 +275,7 @@ export default function App() {
         if (cachedRaw) {
           const parsed = JSON.parse(cachedRaw);
           if (parsed && parsed.id === firebaseUser.uid && parsed.ativo) {
-            setCurrentUser(parsed);
+            setCurrentUser(normalizeUserProfile(parsed, firebaseUser.uid));
             setAuthLoading(false);
           }
         }
@@ -384,7 +377,7 @@ export default function App() {
             if (cachedRaw) {
               const parsed = JSON.parse(cachedRaw);
               if (parsed && parsed.ativo) {
-                setCurrentUser(parsed);
+                setCurrentUser(normalizeUserProfile(parsed, firebaseUser.uid));
                 setAuthLoading(false);
                 return;
               }
@@ -424,11 +417,10 @@ export default function App() {
   // Lançar / Editar Save
   const handleSaveInspection = async (inspection: Inspection) => {
     try {
-      await dbService.saveInspection(inspection);
+      const result = await dbService.saveInspection(inspection);
       refreshDatabaseStates();
-      setEditingInspection(null);
-      triggerAlert(editingInspection ? "Inspeção atualizada com sucesso!" : "Nova inspeção GEMBA lançada com sucesso!");
-      setActiveTab("historico");
+      const message = editingInspection ? "Inspeção atualizada com sucesso!" : "Nova inspeção GEMBA lançada com sucesso!";
+      triggerAlert(message + (result.warnings.length ? ` Aviso: ${result.warnings.join("; ")}. Não repita o lançamento.` : ""));
     } catch (error: any) {
       console.error(error);
       triggerAlert(error?.message || "Não foi possível salvar a inspeção.", "error");
@@ -923,7 +915,7 @@ export default function App() {
   const sidebarWidth = sidebarCollapsed ? 64 : 224;
 
   return (
-    <div className="flex h-screen overflow-hidden bg-[#f8fafc] text-gray-800 font-sans">
+    <div className="app-shell flex h-screen overflow-hidden bg-[#f8fafc] text-gray-800 font-sans">
       {/* SIDEBAR NAVIGATION */}
       <Sidebar
         activeTab={activeTab}
@@ -1141,8 +1133,22 @@ export default function App() {
         </header>
 
         {/* SCREEN WORKSPACE INNER CONTAINER */}
-        <main className="flex-1 overflow-y-auto px-4 pt-4 pb-20 md:pt-5 md:pb-20 print:p-0">
-          <div className="max-w-7xl mx-auto h-full">
+        <main className="flex-1 min-h-0 overflow-y-auto px-4 pt-4 pb-8 md:pt-5 print:p-0">
+          <div className="max-w-7xl mx-auto min-h-full">
+            {syncState.errors.length > 0 && (
+              <div role="alert" className="mb-4 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+                Falha ao atualizar dados. Os registros já recebidos foram mantidos.
+                <p className="mt-1 text-xs">{syncState.errors.map(e => `${e.collection}: ${e.code}`).join("; ")}</p>
+                <button type="button" className="mt-2 font-bold underline" onClick={() => currentUser && dbService.retrySync(currentUser)}>Tentar sincronizar novamente</button>
+              </div>
+            )}
+            {!viewDataReady ? (
+              <div role="status" className="rounded-xl border bg-white p-8 text-center text-[#0B2E59]">
+                {syncState.errors.length ? "Carregamento incompleto. Confira o aviso acima." :
+                  isOnline ? "Carregando inspeções e responsáveis…" : "Sem conexão. Aguardando dados disponíveis neste dispositivo…"}
+              </div>
+            ) : <>
+
             
             {activeTab === "dashboard" && (
               <DashboardView
@@ -1237,6 +1243,7 @@ export default function App() {
               />
             )}
 
+            </>}
           </div>
         </main>
 
@@ -1244,10 +1251,6 @@ export default function App() {
         <footer
           id="app-footer"
           className="app-footer no-print"
-          style={{
-            left: `${sidebarWidth}px`,
-            width: `calc(100% - ${sidebarWidth}px)`
-          }}
         >
           <div className="app-footer-company">
             {config.nomeEmpresa} &copy; {new Date().getFullYear()} — {config.nomeSistema}
@@ -1260,8 +1263,8 @@ export default function App() {
 
           <div className="app-footer-status">
             <span className="firebase-status">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shrink-0"></span>
-              FIREBASE SINCRONIZADO
+              <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${isOnline && syncState.serverReady ? "bg-emerald-400" : "bg-amber-400"}`}></span>
+              {!isOnline ? "OFFLINE — DADOS LOCAIS" : syncState.errors.length ? "FALHA NA SINCRONIZAÇÃO" : syncState.serverReady ? "FIREBASE SINCRONIZADO" : "SINCRONIZANDO DADOS"}
             </span>
             <span className="footer-separator">|</span>
             <span

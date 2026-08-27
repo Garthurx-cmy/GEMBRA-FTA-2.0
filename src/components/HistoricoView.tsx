@@ -42,8 +42,12 @@ import ResolvedImage from "./ResolvedImage";
 import {
   getEffectiveMonthKey,
   getInspectionMonthKey,
-  getMonthOptions
+  getMonthOptions,
+  getNormalizedInspectionDate
 } from "../utils/inspectionUtils";
+
+import { inspectionBelongsToSupervisor, supervisorMatchesId, normalizeText } from "../utils/supervisors";
+import { useOperationalDate } from "../utils/useOperationalDate";
 
 interface HistoricoViewProps {
   inspections: Inspection[];
@@ -74,7 +78,8 @@ export default function HistoricoView({
 }: HistoricoViewProps) {
   const [localMonth, setLocalMonth] = useState("auto");
   const activeMonth = propSelectedMonth !== undefined ? propSelectedMonth : localMonth;
-  const effectiveMonthKey = getEffectiveMonthKey(activeMonth);
+  const operationalToday = useOperationalDate();
+  const effectiveMonthKey = getEffectiveMonthKey(activeMonth, operationalToday);
 
   const handleMonthChange = (val: string) => {
     if (onSelectMonth) {
@@ -157,105 +162,14 @@ export default function HistoricoView({
     }
   };
 
-  // --- PAGINATION STATES ---
-  const [localInspections, setLocalInspections] = useState<Inspection[]>([]);
-  const [loading, setLoading] = useState(false);
+  // Paginate only the complete, authorized realtime data already loaded by App.
   const [currentPage, setCurrentPage] = useState(1);
-  const [hasMore, setHasMore] = useState(false);
-  const [docHistory, setDocHistory] = useState<(string | null)[]>([null]);
-  const [refreshTrigger, setRefreshTrigger] = useState(0);
+  useEffect(() => { setCurrentPage(1); }, [searchTerm, selectedSupervisor,
+    selectedArea, selectedContract, selectedTipo, selectedStatus,
+    selectedPotencial, filterDate, activeMonth, effectiveMonthKey]);
 
-  // Sync / Listen to DB updates to auto-refresh current page
-  useEffect(() => {
-    const handleDbUpdate = (e: any) => {
-      if (e.detail?.key === "inspections") {
-        setRefreshTrigger(prev => prev + 1);
-      }
-    };
-    window.addEventListener("gemba_fta_db_update", handleDbUpdate);
-    return () => window.removeEventListener("gemba_fta_db_update", handleDbUpdate);
-  }, []);
-
-  // Reset to first page when search terms or filter configurations change
-  useEffect(() => {
-    setCurrentPage(1);
-    setDocHistory([null]);
-  }, [
-    searchTerm,
-    selectedSupervisor,
-    selectedArea,
-    selectedContract,
-    selectedTipo,
-    selectedStatus,
-    selectedPotencial,
-    filterDate
-  ]);
-
-  // Load paginated data from Firestore on-demand
-  useEffect(() => {
-    let active = true;
-    const fetchData = async () => {
-      if (document.visibilityState !== "visible") return;
-      setLoading(true);
-      try {
-        const startAfterId = docHistory[currentPage - 1] || null;
-        const result = await dbService.getPaginatedInspections({
-          limit: 25,
-          startAfterDocId: startAfterId,
-          filters: {
-            searchTerm: searchTerm.trim() || undefined,
-            supervisorId: selectedSupervisor,
-            areaId: selectedArea,
-            contratoId: selectedContract,
-            status: selectedStatus,
-            potencial: selectedPotencial,
-            data: filterDate || undefined,
-            tipo: selectedTipo
-          }
-        });
-        
-        if (active) {
-          setLocalInspections(result.items);
-          setHasMore(result.hasMore);
-          if (result.lastDocId) {
-            setDocHistory(prev => {
-              const copy = [...prev];
-              copy[currentPage] = result.lastDocId;
-              return copy;
-            });
-          }
-        }
-      } catch (err) {
-        console.error("Erro ao carregar histórico paginado:", err);
-      } finally {
-        if (active) setLoading(false);
-      }
-    };
-
-    // Debounce to prevent multiple queries during typing
-    const timer = setTimeout(fetchData, 350);
-    return () => {
-      active = false;
-      clearTimeout(timer);
-    };
-  }, [
-    currentPage,
-    searchTerm,
-    selectedSupervisor,
-    selectedArea,
-    selectedContract,
-    selectedTipo,
-    selectedStatus,
-    selectedPotencial,
-    filterDate,
-    refreshTrigger
-  ]);
-
-  const isCarijunio = Boolean(
-    currentUser?.nome?.toLowerCase().includes("carijunio") ||
-    currentUser?.email?.toLowerCase().includes("carijunio")
-  );
-  const isTeamLeader = (currentUser?.perfil === "Líder de Equipe" || currentUser?.perfil === "Lider de Equipe") && !isCarijunio;
+  const isTeamLeader = [currentUser?.perfil, currentUser?.cargo]
+    .some(role => normalizeText(role || "") === "lider de equipe");
   const isOwnInspection = (item: Inspection) => {
     if (!currentUser) return false;
     if (item.criadoPorUid && item.criadoPorUid === currentUser.id) return true;
@@ -268,10 +182,14 @@ export default function HistoricoView({
     return true;
   };
 
+  // Helper resolvers
+  const getSupervisorName = (id: string) => supervisors.find((s) => supervisorMatchesId(s, id))?.nome || (currentUser?.id === id ? currentUser.nome : "") || dbService.getDeletedNames()[id] || "Outros";
+  const getAreaName = (id: string) => areas.find((a) => a.id === id)?.nome || dbService.getDeletedNames()[id] || "Outros";
+  const getContractCode = (id: string) => contracts.find((c) => c.id === id)?.codigo || dbService.getDeletedNames()[id] || "Contrato Geral";
+
   // Map filteredInspections to memoized list filtered by active month and criteria
   const filteredInspections = useMemo(() => {
-    const list = inspections && inspections.length > 0 ? inspections : localInspections;
-    return list.filter((item) => {
+    return inspections.filter((item) => {
       // Líder de Equipe: visualiza apenas os próprios lançamentos
       if (isTeamLeader && !isOwnInspection(item)) return false;
 
@@ -281,7 +199,7 @@ export default function HistoricoView({
         if (monthKey !== effectiveMonthKey) return false;
       }
       // Supervisor filter
-      if (selectedSupervisor !== "all" && item.supervisorId !== selectedSupervisor) return false;
+      if (selectedSupervisor !== "all" && !supervisors.some(sup => sup.id === selectedSupervisor && inspectionBelongsToSupervisor(item, sup, supervisors))) return false;
       // Area filter
       if (selectedArea !== "all" && item.areaId !== selectedArea) return false;
       // Contract filter
@@ -293,7 +211,7 @@ export default function HistoricoView({
       // Potencial filter
       if (selectedPotencial !== "all" && item.potencial !== selectedPotencial) return false;
       // Date filter
-      if (filterDate && item.data !== filterDate) return false;
+      if (filterDate && getNormalizedInspectionDate(item) !== filterDate) return false;
       // Search term
       if (searchTerm.trim()) {
         const term = searchTerm.trim().toLowerCase();
@@ -318,7 +236,7 @@ export default function HistoricoView({
     });
   }, [
     inspections,
-    localInspections,
+    currentUser,
     activeMonth,
     effectiveMonthKey,
     selectedSupervisor,
@@ -334,10 +252,10 @@ export default function HistoricoView({
     contracts
   ]);
 
-  // Helper resolvers
-  const getSupervisorName = (id: string) => supervisors.find((s) => s.id === id)?.nome || (currentUser?.id === id ? currentUser.nome : "") || dbService.getDeletedNames()[id] || "Outros";
-  const getAreaName = (id: string) => areas.find((a) => a.id === id)?.nome || dbService.getDeletedNames()[id] || "Outros";
-  const getContractCode = (id: string) => contracts.find((c) => c.id === id)?.codigo || dbService.getDeletedNames()[id] || "Contrato Geral";
+  const pageCount = Math.max(1, Math.ceil(filteredInspections.length / 25));
+  const visiblePage = Math.min(currentPage, pageCount);
+  const pageInspections = filteredInspections.slice((visiblePage - 1) * 25, visiblePage * 25);
+  useEffect(() => { setCurrentPage(page => Math.min(page, pageCount)); }, [pageCount]);
 
   const getPotentialBadge = (potencial: Potential) => {
     switch (potencial) {
@@ -525,7 +443,7 @@ export default function HistoricoView({
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100 text-xs text-gray-700 font-medium">
-              {filteredInspections.map((item) => (
+              {pageInspections.map((item) => (
                 <tr key={item.id} className="hover:bg-gray-50/50 transition-colors">
                   {/* Data */}
                   <td className="py-3.5 px-4 font-semibold text-[#0B2E59] shrink-0">
@@ -665,22 +583,19 @@ export default function HistoricoView({
         {/* Pagination controls */}
         <div className="flex items-center justify-between px-6 py-4 bg-gray-50 border-t border-gray-100">
           <div className="text-[10px] text-gray-500 font-extrabold tracking-wider uppercase flex items-center gap-2">
-            <span>Página {currentPage}</span>
-            {loading && (
-              <span className="inline-block w-2.5 h-2.5 border-2 border-blue-600 border-t-transparent rounded-full animate-spin"></span>
-            )}
+            <span>Página {visiblePage} de {pageCount} · {filteredInspections.length} inspeções</span>
           </div>
           <div className="flex items-center gap-2">
             <button
               onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
-              disabled={currentPage === 1 || loading}
+              disabled={visiblePage === 1}
               className="px-3 py-1.5 bg-white border border-gray-200 text-[#0B2E59] text-xs font-bold rounded-lg hover:bg-gray-50 disabled:opacity-50 transition-colors cursor-pointer"
             >
               Anterior
             </button>
             <button
               onClick={() => setCurrentPage(prev => prev + 1)}
-              disabled={!hasMore || loading}
+              disabled={visiblePage >= pageCount}
               className="px-3 py-1.5 bg-white border border-gray-200 text-[#0B2E59] text-xs font-bold rounded-lg hover:bg-gray-50 disabled:opacity-50 transition-colors cursor-pointer"
             >
               Próximo

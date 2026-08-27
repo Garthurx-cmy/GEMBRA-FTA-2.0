@@ -1,0 +1,21 @@
+// Isolated UI fixture. Not included in the production build or connected to Firebase.
+import React from "react";
+import { createRoot } from "react-dom/client";
+import App from "../src/App";
+import { state, emit } from "./firestoreMock";
+const now = new Date().toISOString();
+const supervisor={id:"sup-old",nome:"Supervisora Teste",email:"supervisor@example.test",perfil:"supervisor",cargo:"Supervisor",ativo:true,gruposContratoPermitidos:["vli"],metaSemanal:7,metaMensal:28};
+state.autoEmit=true;
+state.docs.set("users/test-admin",{nome:"Administrador Teste",email:"test-admin@example.test",perfil:"Administrador",ativo:true,gruposContratoPermitidos:["vale","vli"],primeiroAcesso:false,deveAlterarSenha:false,ultimoLogin:now,participaFarolGemba:false});
+state.docs.set("users/current",{...supervisor,id:"current"});
+state.docs.set("supervisors/sup-old",supervisor);
+state.docs.set("areas/vli",{id:"vli",nome:"Ipatinga",ativo:true});
+state.docs.set("areas/vale",{id:"vale",nome:"Andaime Vale",ativo:true});
+state.docs.set("contracts/c1",{id:"c1",codigo:"VLI",nome:"VLI Teste",ativo:true,grupoContrato:"vli"});
+state.docs.set("contracts/c2",{id:"c2",codigo:"VALE",nome:"Andaime Vale",ativo:true,grupoContrato:"vale"});
+state.docs.set("settings/config",{nomeEmpresa:"AMBIENTE DE TESTE — SEM FIREBASE",nomeSistema:"GEMBA FTA",logoUrl:"/logo-fta.png"});
+state.docs.set("deleted_names/old-removed",{name:supervisor.nome});
+for(let n=0;n<3;n++) state.docs.set(`inspections/sample-${n}`,{id:`sample-${n}`,data:"2026-08-20",supervisorId:n===2?"old-removed":"sup-old",areaId:"vli",contratoId:"c1",grupoContrato:"vli",atividade:"DSS",tipo:"DSS",tipoLancamento:"DSS",descricao:`Inspeção fictícia ${n}`,acaoCorretiva:"Teste",responsavel:"Supervisora Teste",prazo:"2026-08-20",status:"Concluído",potencial:"Leve",temaDSS:"Teste",quantidadeParticipantes:2,criadoPorUid:"test-admin",createdAt:now,fotosAntes:[],fotosDepois:[]});
+createRoot(document.getElementById("root")!).render(<App/>);
+const control=document.createElement("button");control.textContent="Simular snapshot";control.style.cssText="position:fixed;right:10px;top:4px;z-index:9999;background:#fde68a;font-size:11px;padding:4px;border:1px solid black";
+let count=0;control.onclick=()=>{emit();control.textContent=`Snapshot simulado ${++count}`;};document.body.appendChild(control);

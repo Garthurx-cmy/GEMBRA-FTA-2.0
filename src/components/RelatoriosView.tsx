@@ -5,6 +5,8 @@
 
 import React, { useState, useEffect, useMemo } from "react";
 import { dbService } from "../services/db";
+import { inspectionBelongsToSupervisor, supervisorMatchesId } from "../utils/supervisors";
+import { getNormalizedInspectionDate, getInspectionMonthKey } from "../utils/inspectionUtils";
 import { Inspection, Supervisor, Area, Contract, SystemConfig, getTipoLancamento } from "../types";
 import { Printer, FileText, Calendar, User, ShieldAlert, CheckCircle, Eye, RefreshCw, Download, Filter, XCircle } from "lucide-react";
 import { jsPDF } from "jspdf";
@@ -98,84 +100,9 @@ export default function RelatoriosView({
   const [selectedMonth, setSelectedMonth] = useState<string>("");
   const [selectedYear, setSelectedYear] = useState<string>("");
 
-  // --- ON-DEMAND BACKGROUND FILTERING STATES ---
-  const [fetchedInspections, setFetchedInspections] = useState<Inspection[]>([]);
-  const [loadingFilters, setLoadingFilters] = useState(false);
-
-  const filtersActive = !!(
-    selectedSupervisor ||
-    selectedArea ||
-    selectedTipo ||
-    selectedStatus ||
-    selectedPotencial ||
-    startDate ||
-    endDate ||
-    selectedMonth ||
-    selectedYear
-  );
-
-  useEffect(() => {
-    if (!filtersActive) {
-      setFetchedInspections([]);
-      return;
-    }
-
-    let active = true;
-    const fetchFiltered = async () => {
-      if (document.visibilityState !== "visible") return;
-      setLoadingFilters(true);
-      try {
-        const result = await dbService.getPaginatedInspections({
-          limit: 100, // Fetch up to 100 matched records for reports
-          filters: {
-            supervisorId: selectedSupervisor,
-            areaId: selectedArea,
-            tipo: selectedTipo,
-            status: selectedStatus,
-            potencial: selectedPotencial,
-            data: startDate || undefined
-          }
-        });
-        if (active) {
-          setFetchedInspections(result.items);
-        }
-      } catch (err) {
-        console.error("Erro ao carregar relatórios filtrados:", err);
-      } finally {
-        if (active) setLoadingFilters(false);
-      }
-    };
-
-    const timer = setTimeout(fetchFiltered, 350);
-    return () => {
-      active = false;
-      clearTimeout(timer);
-    };
-  }, [
-    selectedSupervisor,
-    selectedArea,
-    selectedTipo,
-    selectedStatus,
-    selectedPotencial,
-    startDate,
-    endDate,
-    selectedMonth,
-    selectedYear,
-    filtersActive
-  ]);
-
-  const combinedInspections = useMemo(() => {
-    if (!filtersActive) return inspections;
-    const seen = new Set<string>();
-    const merged: Inspection[] = [];
-    [...fetchedInspections, ...inspections].forEach(item => {
-      if (!seen.has(item.id)) {
-        seen.add(item.id);
-        merged.push(item);
-      }
-    });
-    return merged;
-  }, [inspections, fetchedInspections, filtersActive]);
+  // Use the same authorized live snapshot as Dashboard and History.
+  // A separate limited query could overwrite updated records with stale copies.
+  const combinedInspections = inspections;
 
   // Calculate unique types of launch dynamically
   const uniqueTipos = useMemo(() => {
@@ -193,7 +120,7 @@ export default function RelatoriosView({
     const years = new Set<string>();
     combinedInspections.forEach((i) => {
       if (i.data) {
-        const yr = i.data.split("-")[0];
+        const yr = getInspectionMonthKey(i)?.slice(0,4);
         if (yr && yr.length === 4) {
           years.add(yr);
         }
@@ -206,7 +133,7 @@ export default function RelatoriosView({
   // Apply filters memoized
   const filteredInspections = useMemo(() => {
     return combinedInspections.filter((item) => {
-      if (selectedSupervisor && item.supervisorId !== selectedSupervisor) {
+      if (selectedSupervisor && !supervisors.some(sup => sup.id === selectedSupervisor && inspectionBelongsToSupervisor(item, sup, supervisors))) {
         return false;
       }
       if (selectedArea && item.areaId !== selectedArea) {
@@ -214,7 +141,7 @@ export default function RelatoriosView({
       }
       if (selectedTipo) {
         const itemTipoLancamento = getTipoLancamento(item.atividade, item.tipo, item.tipoLancamento);
-        if (item.tipo !== selectedTipo && itemTipoLancamento !== selectedTipo) {
+        if (itemTipoLancamento !== selectedTipo) {
           return false;
         }
       }
@@ -224,14 +151,15 @@ export default function RelatoriosView({
       if (selectedPotencial && item.potencial !== selectedPotencial) {
         return false;
       }
-      if (startDate && item.data < startDate) {
+      const date = getNormalizedInspectionDate(item);
+      if (startDate && (!date || date < startDate)) {
         return false;
       }
-      if (endDate && item.data > endDate) {
+      if (endDate && (!date || date > endDate)) {
         return false;
       }
       if (selectedMonth || selectedYear) {
-        const [year, month] = item.data.split("-");
+        const [year, month] = (getInspectionMonthKey(item) || "").split("-");
         if (selectedYear && year !== selectedYear) {
           return false;
         }
@@ -243,6 +171,7 @@ export default function RelatoriosView({
     });
   }, [
     combinedInspections,
+    supervisors,
     selectedSupervisor,
     selectedArea,
     selectedTipo,
@@ -285,7 +214,7 @@ export default function RelatoriosView({
   const isPresenca = selectedInspection && getTipoLancamento(selectedInspection.atividade, selectedInspection.tipo, selectedInspection.tipoLancamento) === "Presença em Campo";
 
   // Helper resolvers
-  const getSupervisorName = (id: string) => supervisors.find((s) => s.id === id)?.nome || dbService.getDeletedNames()[id] || "Outros";
+  const getSupervisorName = (id: string) => supervisors.find((s) => supervisorMatchesId(s, id))?.nome || dbService.getDeletedNames()[id] || "Outros";
   const getAreaName = (id: string) => areas.find((a) => a.id === id)?.nome || dbService.getDeletedNames()[id] || "Outros";
   const getContractCode = (id: string) => contracts.find((c) => c.id === id)?.codigo || dbService.getDeletedNames()[id] || "Geral";
 

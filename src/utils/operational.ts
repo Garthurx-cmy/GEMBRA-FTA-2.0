@@ -1,3 +1,4 @@
+import { supervisorMatchesId } from "./supervisors";
 import { Area, Contract, GrupoContrato, GrupoContratoFiltro, Inspection, Supervisor } from "../types";
 import { getSingleInspectionScore } from "./scoring";
 
@@ -162,7 +163,7 @@ export function getInspectionGrupoContrato(
   // Isso ajuda a recuperar inspeções VLI antigas cujo campo grupoContrato foi
   // preenchido incorretamente como Vale, sem forçar usuários com acesso aos dois.
   if (inspection.supervisorId) {
-    const supervisor = supervisors.find(s => s.id === inspection.supervisorId);
+    const supervisor = supervisors.find(s => supervisorMatchesId(s, inspection.supervisorId));
     if (supervisor) {
       const explicitGroups = supervisor.gruposContratoPermitidos || [];
       if (explicitGroups.length === 1) return explicitGroups[0];

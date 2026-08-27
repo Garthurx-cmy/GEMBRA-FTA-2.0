@@ -1,0 +1,30 @@
+✔ month switch keeps August and shows no September records (24.973359ms)
+✔ month boundary follows Sao Paulo and leaves a selected historical month fixed (0.511115ms)
+✔ monthly deduplication is by ID, never by description (0.563612ms)
+✔ confirmed duplicate emails retain historical aliases without changing stored IDs (0.977432ms)
+✔ homonyms are not merged or guessed (1.857979ms)
+✔ exact historical deleted-name evidence restores a unique association (0.410668ms)
+✔ Farol renders complete monthly history with old IDs and no cross-contract contribution (18.889901ms)
+✔ unresolved history is visible as an explicit warning (8.685777ms)
+✔ contract classification separates Vale from VLI without mutating documents (0.391259ms)
+✔ leader goals remain 4/16, supervisor's custom goals remain configured (1.449986ms)
+✔ DIAL and behavioral deviation are exclusive and keep two points (0.261852ms)
+✔ legacy permissions normalize to arrays and admin sees both scopes (0.790361ms)
+✔ restricted listener filters on server; admin history is not capped; startSync is idempotent (1.164854ms)
+✔ empty initial cache is loading, not an empty database (0.813399ms)
+✔ listener failure preserves records and is never synchronized (0.690768ms)
+✔ saving sanitizes undefined deeply and preserves Firestore sentinels (2.943238ms)
+✔ notification failure after main save is a warning, not a failed inspection (0.792979ms)
+✔ main write failure does not report success or add notifications (0.630995ms)
+✔ editing status keeps historical contract, ID, date and authorship (0.986245ms)
+✔ drafts survive storage fallback, distinguish editing and creation, and delete after save (1.81965ms)
+✔ history applies month before pagination and shows legacy responsible names (62.101273ms)
+✔ server snapshots emit the inspection event consumed by realtime views (0.502449ms)
+ℹ tests 22
+ℹ suites 0
+ℹ pass 22
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 654.343745

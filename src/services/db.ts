@@ -25,7 +25,7 @@ import {
   onSnapshot as fbOnSnapshot,
   serverTimestamp, getDocs as fbGetDocs, query, where,
   writeBatch as fbWriteBatch,
-  orderBy, limit, startAfter, getDoc as fbGetDoc,
+  orderBy, limit, getDoc as fbGetDoc,
   deleteField
 } from "firebase/firestore";
 
@@ -33,7 +33,7 @@ import {
 const getDoc = async (ref: any): Promise<any> => {
   const path = ref && typeof ref.path === "string" ? ref.path : "unknown-path";
   const horario = new Date().toISOString();
-  console.trace("[FIRESTORE READ]", {
+  if (import.meta.env.DEV) console.trace("[FIRESTORE READ]", {
     operacao: "getDoc",
     colecao: path,
     origem: "DBService",
@@ -54,7 +54,7 @@ const getDocs = async (ref: any): Promise<any> => {
     }
   }
   const horario = new Date().toISOString();
-  console.trace("[FIRESTORE READ]", {
+  if (import.meta.env.DEV) console.trace("[FIRESTORE READ]", {
     operacao: "getDocs",
     colecao: path,
     origem: "DBService",
@@ -75,7 +75,7 @@ const onSnapshot = (ref: any, ...args: any[]) => {
     }
   }
   const horario = new Date().toISOString();
-  console.trace("[FIRESTORE READ - LISTENER CREATED]", {
+  if (import.meta.env.DEV) console.trace("[FIRESTORE READ - LISTENER CREATED]", {
     operacao: "onSnapshot",
     colecao: path,
     origem: "DBService",
@@ -87,7 +87,7 @@ const onSnapshot = (ref: any, ...args: any[]) => {
   const unsubscribe = (fbOnSnapshot as any)(ref, ...args);
 
   return () => {
-    console.trace("[FIRESTORE READ - LISTENER CLOSED]", {
+    if (import.meta.env.DEV) console.trace("[FIRESTORE READ - LISTENER CLOSED]", {
       operacao: "unsubscribe",
       colecao: path,
       origem: "DBService",
@@ -128,7 +128,7 @@ const setDoc = async (ref: any, data: any, options?: any) => {
   const safeData = sanitizeFirestoreData(data);
   if (import.meta.env.DEV) {
     const path = ref && typeof ref.path === "string" ? ref.path : "unknown-path";
-    console.trace("[FIRESTORE WRITE]", path, "setDoc", safeData);
+    if (import.meta.env.DEV) console.trace("[FIRESTORE WRITE]", path, "setDoc", safeData);
   }
   return fbSetDoc(ref, safeData, options);
 };
@@ -137,7 +137,7 @@ const updateDoc = async (ref: any, data: any) => {
   const safeData = sanitizeFirestoreData(data);
   if (import.meta.env.DEV) {
     const path = ref && typeof ref.path === "string" ? ref.path : "unknown-path";
-    console.trace("[FIRESTORE WRITE]", path, "updateDoc", safeData);
+    if (import.meta.env.DEV) console.trace("[FIRESTORE WRITE]", path, "updateDoc", safeData);
   }
   return fbUpdateDoc(ref, safeData);
 };
@@ -145,7 +145,7 @@ const updateDoc = async (ref: any, data: any) => {
 const deleteDoc = async (ref: any) => {
   if (import.meta.env.DEV) {
     const path = ref && typeof ref.path === "string" ? ref.path : "unknown-path";
-    console.trace("[FIRESTORE WRITE]", path, "deleteDoc");
+    if (import.meta.env.DEV) console.trace("[FIRESTORE WRITE]", path, "deleteDoc");
   }
   return fbDeleteDoc(ref);
 };
@@ -153,7 +153,7 @@ const deleteDoc = async (ref: any) => {
 const writeBatch = (firestoreInstance: any) => {
   const batch = fbWriteBatch(firestoreInstance);
   if (import.meta.env.DEV) {
-    console.trace("[FIRESTORE WRITE] Batch created");
+    if (import.meta.env.DEV) console.trace("[FIRESTORE WRITE] Batch created");
   }
   return batch;
 };
@@ -308,7 +308,7 @@ export function normalizeUserProfile(data: any, docId?: string): UserProfile {
   }
 
   // 8. participaFarolGemba: data.participaFarolGemba ?? true (com suporte a false explícito)
-  let participaFarolGemba = true;
+  let participaFarolGemba: boolean | undefined;
   if (data.participaFarolGemba !== undefined) {
     participaFarolGemba = typeof data.participaFarolGemba === "string" ? data.participaFarolGemba.toLowerCase() === "true" : Boolean(data.participaFarolGemba);
   }
@@ -319,6 +319,8 @@ export function normalizeUserProfile(data: any, docId?: string): UserProfile {
     gruposContratoPermitidos = data.gruposContratoPermitidos
       .map((g: any) => String(g).toLowerCase().trim() as GrupoContrato)
       .filter((g: any) => g === "vale" || g === "vli");
+  } else if (typeof data.gruposContratoPermitidos === "string") {
+    gruposContratoPermitidos = data.gruposContratoPermitidos.toLowerCase().split(/[^a-z]+/).filter((g: string) => g === "vale" || g === "vli");
   } else if (typeof data.grupoContrato === "string") {
     const g = data.grupoContrato.toLowerCase().trim();
     if (g === "vale" || g === "vli") gruposContratoPermitidos = [g as GrupoContrato];
@@ -328,6 +330,9 @@ export function normalizeUserProfile(data: any, docId?: string): UserProfile {
     else if (g.includes("vli")) gruposContratoPermitidos = ["vli"];
     else if (g.includes("vale")) gruposContratoPermitidos = ["vale"];
   }
+
+  gruposContratoPermitidos = [...new Set(gruposContratoPermitidos)];
+  if (perfil === "Desenvolvedor/Admin" || perfil === "Administrador" || perfil === "Gestor") gruposContratoPermitidos = ["vale", "vli"];
 
   // Fallback padrão se não especificado
   if (gruposContratoPermitidos.length === 0) {
@@ -366,6 +371,8 @@ class DBService {
   private deletedNames: Record<string, string> = {};
   private authorizedEmails: AuthorizedEmail[] = [];
   private syncActive = false;
+  private syncErrors: Record<string, string> = {};
+  private syncMetadata: Record<string, { fromCache: boolean; hasPendingWrites: boolean }> = {};
   private unsubscribers: Array<() => void> = [];
   private metadataPreloaded = false;
   private hasReconciledSupervisors = false;
@@ -418,165 +425,97 @@ class DBService {
     };
   }
 
+  getSyncState(currentProfile?: UserProfile | null) {
+    const readiness = this.getReadinessState(currentProfile);
+    const required = ["configReady", "supervisorsReady", "areasReady", "contractsReady", "inspectionsReady", "deletedNamesReady"];
+    if (currentProfile?.perfil === "Administrador" || currentProfile?.perfil === "Desenvolvedor/Admin") required.push("usersReady");
+    const errors = Object.entries(this.syncErrors).map(([collection, code]) => ({ collection, code }));
+    return { ...readiness,
+      appDataReady: readiness.appDataReady && this.readiness.deletedNamesReady,
+      errors,
+      serverReady: readiness.appDataReady && errors.length === 0 && required.every(key =>
+        this.syncMetadata[key]?.fromCache === false && !this.syncMetadata[key]?.hasPendingWrites)
+    };
+  }
+
+  private watch(key: keyof DBService["readiness"], ref: any, receive: (snapshot: any) => void) {
+    this.unsubscribers.push(onSnapshot(ref, { includeMetadataChanges: true }, (snapshot: any) => {
+      const metadata = snapshot.metadata || { fromCache: false, hasPendingWrites: false };
+      this.syncMetadata[key] = { fromCache: metadata.fromCache, hasPendingWrites: metadata.hasPendingWrites };
+      const emptyCache = metadata.fromCache && (snapshot.empty === true ||
+        (typeof snapshot.exists === "function" && !snapshot.exists()));
+      if (!emptyCache) {
+        receive(snapshot);
+        this.readiness[key] = true;
+      }
+      delete this.syncErrors[key];
+      this.emit(key === "deletedNamesReady" ? "deleted_names" : key.replace(/Ready$/, ""));
+    }, (error: any) => {
+      console.error(`Falha de sincronização (${key}):`, error);
+      this.syncErrors[key] = error?.code || "unavailable";
+      // Failed queries are not empty collections. Keep any data already received.
+      this.emit("sync_error");
+    }));
+  }
+
+  retrySync(profile: UserProfile): void {
+    this.stopSync(false);
+    this.syncErrors = {};
+    this.startSync(profile);
+    this.emit("sync_retry");
+  }
+
   startSync(currentProfile?: UserProfile): void {
-    if (this.syncActive || !hasFirebase || !db) return;
+    if (this.syncActive || !hasFirebase || !db || !currentProfile || currentProfile.ativo === false) return;
     this.syncActive = true;
-
-    const isAdmin = currentProfile?.perfil === "Desenvolvedor/Admin" || currentProfile?.perfil === "Administrador";
-    const isGestor = currentProfile?.perfil === "Gestor";
-    
-    // Determine permitted contract groups
-    const permittedGroups: GrupoContrato[] = (isAdmin || isGestor)
-      ? ["vale", "vli"]
-      : (currentProfile?.gruposContratoPermitidos && currentProfile.gruposContratoPermitidos.length > 0
-          ? currentProfile.gruposContratoPermitidos
-          : ["vale", "vli"]);
-
-    // 1. Settings (config) - Global listener
-    this.unsubscribers.push(onSnapshot(doc(db, "settings", "config"), snap => {
+    const isAdmin = currentProfile.perfil === "Desenvolvedor/Admin" || currentProfile.perfil === "Administrador";
+    const isGestor = currentProfile.perfil === "Gestor";
+    const permittedGroups: GrupoContrato[] = isAdmin || isGestor ? ["vale", "vli"] : (currentProfile.gruposContratoPermitidos || []);
+    this.watch("configReady", doc(db, "settings", "config"), snap => {
       this.config = snap.exists() ? ({ ...DEFAULT_CONFIG, ...this.convert(snap.data()) } as SystemConfig) : DEFAULT_CONFIG;
-      this.readiness.configReady = true;
-      this.emit("config");
-    }, err => {
-      console.error("Falha ao sincronizar configurações:", err);
-      this.readiness.configReady = true;
-    }));
-
-    // 2. Deleted Names - Global listener
-    this.unsubscribers.push(onSnapshot(collection(db, "deleted_names"), snap => {
-      this.deletedNames = Object.fromEntries(snap.docs.map(d => [d.id, d.data().name || "Registro removido"]));
-      this.readiness.deletedNamesReady = true;
-      this.emit("deleted_names");
-    }, err => {
-      console.error("Falha ao sincronizar nomes removidos:", err);
-      this.readiness.deletedNamesReady = true;
-    }));
-
-    // 3. Notifications - Global listener
-    this.unsubscribers.push(onSnapshot(query(collection(db, "notifications"), orderBy("createdAt", "desc"), limit(20)), snap => {
-      this.notifications = snap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as AppNotification));
-      this.readiness.notificationsReady = true;
-      this.emit("notifications");
-    }, err => {
-      console.error("Falha ao sincronizar notificações:", err);
-      this.readiness.notificationsReady = true;
-    }));
-
-    // 4. Supervisors - Operational directory filtered by contract permission
-    this.unsubscribers.push(onSnapshot(collection(db, "supervisors"), snap => {
-      const allSups = snap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as Supervisor));
-      if (permittedGroups.length === 1) {
-        const targetGroup = permittedGroups[0];
-        this.supervisors = allSups.filter(s => isSupervisorFromGrupoContrato(s, targetGroup));
-      } else {
-        this.supervisors = allSups;
-      }
-      this.readiness.supervisorsReady = true;
-      this.emit("supervisors");
-    }, err => {
-      console.error("Falha ao sincronizar supervisores:", err);
-      this.readiness.supervisorsReady = true;
-    }));
-
-    // 5. Areas - Filtered by contract permission
-    this.unsubscribers.push(onSnapshot(collection(db, "areas"), snap => {
-      const allAreas = snap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as Area));
-      if (permittedGroups.length === 1) {
-        const targetGroup = permittedGroups[0];
-        this.areas = allAreas.filter(a => getGrupoContratoPorLocalidade(a, allAreas, this.contracts) === targetGroup);
-      } else {
-        this.areas = allAreas;
-      }
-      this.readiness.areasReady = true;
-      this.emit("areas");
-    }, err => {
-      console.error("Falha ao sincronizar áreas:", err);
-      this.readiness.areasReady = true;
-    }));
-
-    // 6. Contracts - Filtered by contract permission
-    this.unsubscribers.push(onSnapshot(collection(db, "contracts"), snap => {
-      const allContracts = snap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as Contract));
-      if (permittedGroups.length === 1) {
-        const targetGroup = permittedGroups[0];
-        this.contracts = allContracts.filter(c => {
-          const g = c.grupoContrato || (getContractGroup(c.id, allContracts).toLowerCase() as GrupoContrato);
-          return g === targetGroup;
-        });
-      } else {
-        this.contracts = allContracts;
-      }
-      this.readiness.contractsReady = true;
-      this.emit("contracts");
-    }, err => {
-      console.error("Falha ao sincronizar contratos:", err);
-      this.readiness.contractsReady = true;
-    }));
-
-    // 7. Inspections
-    // Admin/Gestor precisam carregar também os registros legados sem grupoContrato
-    // para que o Dashboard/Farol consigam recuperar o histórico completo. Usuários
-    // restritos a um único grupo continuam com filtro na origem.
-    let inspQuery;
-    if (isAdmin || isGestor) {
-      inspQuery = query(
-        collection(db, "inspections"),
-        limit(3000)
-      );
-    } else if (permittedGroups.length === 1) {
-      inspQuery = query(
-        collection(db, "inspections"),
-        where("grupoContrato", "==", permittedGroups[0]),
-        limit(1000)
-      );
-    } else {
-      inspQuery = query(
-        collection(db, "inspections"),
-        where("grupoContrato", "in", ["vale", "vli"]),
-        limit(1000)
-      );
-    }
-
-    this.unsubscribers.push(onSnapshot(inspQuery, snap => {
-      this.inspections = snap.docs
-        .map(d => ({ id: d.id, ...this.convert(d.data()) } as Inspection))
-        .sort((a, b) => {
-          const da = a.data || "";
-          const db = b.data || "";
-          if (da !== db) return db.localeCompare(da);
-          return (b.createdAt || "").localeCompare(a.createdAt || "");
-        });
-      this.readiness.inspectionsReady = true;
-      this.emit("inspections");
-    }, err => {
-      console.error("Falha ao sincronizar inspeções:", err);
-      // Fallback in case of index delay
-      this.readiness.inspectionsReady = true;
-    }));
-
-    // 8. Admin-Only Collections: users & authorized_emails
+    });
+    this.watch("deletedNamesReady", collection(db, "deleted_names"), snap => {
+      this.deletedNames = Object.fromEntries(snap.docs.map((d: any) => [d.id, d.data().name || "Registro removido"]));
+    });
+    this.watch("notificationsReady", query(collection(db, "notifications"), orderBy("createdAt", "desc"), limit(20)), snap => {
+      this.notifications = snap.docs.map((d: any) => ({ id: d.id, ...this.convert(d.data()) } as AppNotification));
+    });
+    this.watch("supervisorsReady", collection(db, "supervisors"), snap => {
+      const allSups: Supervisor[] = snap.docs.map((d: any) => ({ id: d.id, ...this.convert(d.data()) } as Supervisor));
+      this.supervisors = permittedGroups.length === 2 ? allSups : allSups.filter(s =>
+        permittedGroups.some(group => isSupervisorFromGrupoContrato(s, group)));
+    });
+    this.watch("areasReady", collection(db, "areas"), snap => {
+      const allAreas: Area[] = snap.docs.map((d: any) => ({ id: d.id, ...this.convert(d.data()) } as Area));
+      this.areas = permittedGroups.length === 2 ? allAreas : allAreas.filter(a =>
+        permittedGroups.includes(getGrupoContratoPorLocalidade(a, allAreas, this.contracts)!));
+    });
+    this.watch("contractsReady", collection(db, "contracts"), snap => {
+      const allContracts: Contract[] = snap.docs.map((d: any) => ({ id: d.id, ...this.convert(d.data()) } as Contract));
+      this.contracts = permittedGroups.length === 2 ? allContracts : allContracts.filter(c =>
+        permittedGroups.includes(c.grupoContrato || getContractGroup(c.id, allContracts).toLowerCase() as GrupoContrato));
+    });
+    // No arbitrary history cap: the monthly totals must include every authorized record.
+    // Admin/manager retain access to legacy records. Restricted users retain server filtering.
+    const inspectionsRef = collection(db, "inspections");
+    const inspQuery = isAdmin || isGestor ? inspectionsRef : permittedGroups.length === 1
+      ? query(inspectionsRef, where("grupoContrato", "==", permittedGroups[0]))
+      : query(inspectionsRef, where("grupoContrato", "in", permittedGroups.length ? permittedGroups : ["sem_acesso"]));
+    this.watch("inspectionsReady", inspQuery, snap => {
+      this.inspections = snap.docs.map((d: any) => ({ id: d.id, ...this.convert(d.data()) } as Inspection))
+        .sort((a: Inspection, b: Inspection) => String(b.data || "").localeCompare(String(a.data || "")) ||
+          String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+    });
     if (isAdmin) {
-      this.unsubscribers.push(onSnapshot(collection(db, "users"), snap => {
-        this.users = snap.docs.map(d => normalizeUserProfile(this.convert(d.data()), d.id));
-        this.readiness.usersReady = true;
-        this.emit("users");
-      }, err => {
-        console.error("Falha ao sincronizar usuários:", err);
-        this.readiness.usersReady = true;
-      }));
-
+      this.watch("usersReady", collection(db, "users"), snap => {
+        this.users = snap.docs.map((d: any) => normalizeUserProfile(this.convert(d.data()), d.id));
+      });
       this.unsubscribers.push(onSnapshot(collection(db, "authorized_emails"), snap => {
-        this.authorizedEmails = snap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as AuthorizedEmail));
+        this.authorizedEmails = snap.docs.map((d: any) => ({ id: d.id, ...this.convert(d.data()) } as AuthorizedEmail));
         this.emit("authorized_emails");
       }, err => console.error("Falha ao sincronizar e-mails autorizados:", err)));
-
-      // IMPORTANTE: nenhuma reconciliação administrativa é executada automaticamente
-      // durante a sincronização. Leitura do Dashboard/Farol não pode criar, alterar
-      // ou excluir documentos da coleção supervisors. A rotina permanece disponível
-      // apenas para execução administrativa explícita.
-    } else {
-      this.readiness.usersReady = true;
-    }
+    } else this.readiness.usersReady = true;
+    // Read-only synchronization: no automatic reconciliation or document deletion.
   }
 
   async reconcileSupervisors(currentProfile?: UserProfile): Promise<{ reconciled: number; errors: string[] }> {
@@ -648,6 +587,10 @@ class DBService {
       this.users = [];
       this.notifications = [];
       this.authorizedEmails = [];
+      this.deletedNames = {};
+      this.config = DEFAULT_CONFIG;
+      this.syncErrors = {};
+      this.syncMetadata = {};
       this.metadataPreloaded = false;
       this.readiness = {
         configReady: false,
@@ -658,134 +601,6 @@ class DBService {
         contractsReady: false,
         inspectionsReady: false,
         usersReady: false
-      };
-    }
-  }
-
-  async getPaginatedInspections(options: {
-    limit: number;
-    startAfterDocId?: string | null;
-    filters?: {
-      searchTerm?: string;
-      supervisorId?: string;
-      areaId?: string;
-      contratoId?: string;
-      status?: string;
-      potencial?: string;
-      data?: string;
-      tipo?: string;
-    };
-  }) {
-    this.assertFirebase();
-    const f = options.filters || {};
-    
-    try {
-      // Build optimized query with direct Firestore filters
-      let q = query(collection(db, "inspections"), orderBy("data", "desc"));
-      
-      if (f.supervisorId && f.supervisorId !== "all" && f.supervisorId !== "") {
-        q = query(q, where("supervisorId", "==", f.supervisorId));
-      }
-      if (f.areaId && f.areaId !== "all" && f.areaId !== "") {
-        q = query(q, where("areaId", "==", f.areaId));
-      }
-      if (f.contratoId && f.contratoId !== "all" && f.contratoId !== "") {
-        q = query(q, where("contratoId", "==", f.contratoId));
-      }
-      if (f.status && f.status !== "all" && f.status !== "") {
-        q = query(q, where("status", "==", f.status));
-      }
-      if (f.potencial && f.potencial !== "all" && f.potencial !== "") {
-        q = query(q, where("potencial", "==", f.potencial));
-      }
-      if (f.data) {
-        q = query(q, where("data", "==", f.data));
-      }
-
-      if (options.startAfterDocId) {
-        const docSnap = await getDoc(doc(db, "inspections", options.startAfterDocId));
-        if (docSnap.exists()) {
-          q = query(q, startAfter(docSnap));
-        }
-      }
-
-      q = query(q, limit(options.limit));
-      const snap = await getDocs(q);
-      const list = snap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as Inspection));
-      
-      let filteredList = list;
-      if (f.tipo && f.tipo !== "all" && f.tipo !== "") {
-        filteredList = list.filter(item => getTipoLancamento(item.atividade, item.tipo, item.tipoLancamento) === f.tipo);
-      }
-      if (f.searchTerm) {
-        const term = f.searchTerm.toLowerCase();
-        filteredList = filteredList.filter(item => 
-          item.descricao.toLowerCase().includes(term) ||
-          item.acaoCorretiva.toLowerCase().includes(term) ||
-          item.responsavel.toLowerCase().includes(term) ||
-          (item.observacoes && item.observacoes.toLowerCase().includes(term)) ||
-          item.id.toLowerCase().includes(term)
-        );
-      }
-
-      return {
-        items: filteredList,
-        lastDocId: snap.docs.length > 0 ? snap.docs[snap.docs.length - 1].id : null,
-        hasMore: snap.docs.length === options.limit
-      };
-    } catch (err) {
-      console.warn("Firestore index query failed, using safe fallback client-side filtering:", err);
-      
-      // Fallback query: orderBy date and limit 300 to do filtering client-side
-      let q = query(collection(db, "inspections"), orderBy("data", "desc"), limit(300));
-      const snap = await getDocs(q);
-      let list = snap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as Inspection));
-      
-      if (f.supervisorId && f.supervisorId !== "all" && f.supervisorId !== "") {
-        list = list.filter(item => item.supervisorId === f.supervisorId);
-      }
-      if (f.areaId && f.areaId !== "all" && f.areaId !== "") {
-        list = list.filter(item => item.areaId === f.areaId);
-      }
-      if (f.contratoId && f.contratoId !== "all" && f.contratoId !== "") {
-        list = list.filter(item => item.contratoId === f.contratoId);
-      }
-      if (f.status && f.status !== "all" && f.status !== "") {
-        list = list.filter(item => item.status === f.status);
-      }
-      if (f.potencial && f.potencial !== "all" && f.potencial !== "") {
-        list = list.filter(item => item.potencial === f.potencial);
-      }
-      if (f.data) {
-        list = list.filter(item => item.data === f.data);
-      }
-      if (f.tipo && f.tipo !== "all" && f.tipo !== "") {
-        list = list.filter(item => getTipoLancamento(item.atividade, item.tipo, item.tipoLancamento) === f.tipo);
-      }
-      if (f.searchTerm) {
-        const term = f.searchTerm.toLowerCase();
-        list = list.filter(item => 
-          item.descricao.toLowerCase().includes(term) ||
-          item.acaoCorretiva.toLowerCase().includes(term) ||
-          item.responsavel.toLowerCase().includes(term) ||
-          (item.observacoes && item.observacoes.toLowerCase().includes(term)) ||
-          item.id.toLowerCase().includes(term)
-        );
-      }
-
-      let startIndex = 0;
-      if (options.startAfterDocId) {
-        const foundIdx = list.findIndex(item => item.id === options.startAfterDocId);
-        if (foundIdx !== -1) {
-          startIndex = foundIdx + 1;
-        }
-      }
-
-      const paginatedList = list.slice(startIndex, startIndex + options.limit);
-      return {
-        items: paginatedList,
-        lastDocId: paginatedList.length > 0 ? paginatedList[paginatedList.length - 1].id : null,
-        hasMore: startIndex + options.limit < list.length
       };
     }
   }
@@ -846,18 +661,7 @@ class DBService {
   }
 
   getInspections = () => [...this.inspections];
-  getSupervisors = () => {
-    return this.supervisors.map(sup => {
-      if (this.isJhonata(sup)) {
-        return {
-          ...sup,
-          metaSemanal: 2,
-          metaMensal: 8
-        };
-      }
-      return sup;
-    });
-  };
+  getSupervisors = () => [...this.supervisors];
   getAreas = () => [...this.areas];
   getContracts = () => [...this.contracts];
   getUsers = () => [...this.users];
@@ -883,9 +687,11 @@ class DBService {
     });
   }
 
-  async saveInspection(inspection: Inspection): Promise<void> {
+  async saveInspection(inspection: Inspection): Promise<{ warnings: string[] }> {
     this.assertFirebase();
-    const isNew = !this.inspections.some(i => i.id === inspection.id);
+    if (typeof navigator !== "undefined" && !navigator.onLine) throw new Error("Sem conexão. O rascunho foi mantido; reconecte para salvar.");
+    const existing = this.inspections.find(i => i.id === inspection.id);
+    const isNew = !existing;
     const grupoCalculado = getInspectionGrupoContrato(
       inspection,
       this.areas,
@@ -906,11 +712,22 @@ class DBService {
       updatedAt: new Date().toISOString(),
       atualizadoEm: serverTimestamp()
     };
-    if (grupoContrato) payload.grupoContrato = grupoContrato;
+    // Editing text/status must not silently reclassify the historical contract.
+    if (existing && existing.areaId === inspection.areaId && existing.contratoId === inspection.contratoId) {
+      if (existing.grupoContrato) payload.grupoContrato = existing.grupoContrato;
+      else delete payload.grupoContrato;
+    } else if (grupoContrato) payload.grupoContrato = grupoContrato;
     await setDoc(doc(db, "inspections", inspection.id), payload, { merge: true });
-    await this.addAuditLog(isNew ? "create" : "update", "inspection", inspection.id, { supervisorId: inspection.supervisorId, status: inspection.status });
+    this.inspections = [...this.inspections.filter(i => i.id !== inspection.id), { ...inspection, ...payload }];
+    this.emit("inspections");
     const supName = this.supervisors.find(s => s.id === inspection.supervisorId)?.nome || this.users.find(u => u.id === inspection.supervisorId)?.nome || (auth?.currentUser?.uid === inspection.supervisorId ? (auth.currentUser.displayName || auth.currentUser.email) : "") || "Usuário";
-    await this.addNotification(supName, isNew ? "lançou uma inspeção" : "atualizou uma inspeção", inspection.atividade || inspection.tipo);
+    const outcomes = await Promise.allSettled([
+      this.addAuditLog(isNew ? "create" : "update", "inspection", inspection.id, { supervisorId: inspection.supervisorId, status: inspection.status }),
+      this.addNotification(supName, isNew ? "lançou uma inspeção" : "atualizou uma inspeção", inspection.atividade || inspection.tipo)
+    ]);
+    const warnings = outcomes.flatMap((outcome, index) => outcome.status === "rejected"
+      ? [`${index === 0 ? "Auditoria" : "Notificação"}: ${outcome.reason?.code || "falha complementar"}`] : []);
+    return { warnings };
   }
 
   async deleteInspection(id: string): Promise<void> {
@@ -1554,20 +1371,7 @@ class DBService {
     return { created, updated, errors };
   }
 
-  private isJhonata(sup?: any): boolean {
-    if (!sup) return false;
-    const email = String(sup.email || "").trim().toLowerCase();
-    const nome = String(sup.nome || "").toLowerCase();
-    const id = String(sup.id || "").toLowerCase();
-    return (
-      email === "j.santos@grupofta.com.br" ||
-      email === "jhonata.santos@grupofta.com.br" ||
-      email.startsWith("jhonata") ||
-      id.includes("j_santos") ||
-      id.includes("jhonata") ||
-      (nome.includes("jhonata") && (nome.includes("santos") || nome.includes("gonçalves") || nome.includes("goncalves")))
-    );
-  }
+
 }
 
 export const dbService = new DBService();

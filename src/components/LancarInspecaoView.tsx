@@ -1,15 +1,18 @@
+import { getNormalizedInspectionDate, getOperationalDateKey } from "../utils/inspectionUtils";
+import { supervisorMatchesId } from "../utils/supervisors";
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { auth } from "../services/firebase";
 import { isOperationalRole } from "../utils/supervisors";
 import {
   Potential,
   InspectionStatus,
   Inspection,
+  InspectionDraft,
   Supervisor,
   Area,
   Contract,
@@ -152,156 +155,98 @@ export default function LancarInspecaoView({
   const [draftRestored, setDraftRestored] = useState(false);
   const [lastSavedDraftTime, setLastSavedDraftTime] = useState<string | null>(null);
 
-  // Load editing inspection data if provided, or restore draft for new inspection
+  const draftRef = useRef<InspectionDraft | null>(null);
+  const suppressed = useRef(false);
+  const submitLock = useRef(false);
+  const recordId = useRef("");
+  const mounted = useRef(false);
+  const [readyScope, setReadyScope] = useState("");
+  const [resetVersion, setResetVersion] = useState(0);
+  const [draftError, setDraftError] = useState("");
+  const userId = currentUser?.id || "anon";
+  const editId = editingInspection?.id;
+  const scope = `${userId}:${editId || "new"}:${resetVersion}`;
+
+  // Initialize only this user/record. Live directory snapshots must not reset fields.
   useEffect(() => {
-    let isCancelled = false;
-
-    if (editingInspection) {
-      const initialTipo = editingInspection.tipoLancamento || getTipoLancamento(editingInspection.atividade, editingInspection.tipo, editingInspection.tipoLancamento);
-      setData(editingInspection.data || "");
-      setSupervisorId(editingInspection.supervisorId || "");
-      setAreaId(editingInspection.areaId || "");
-      setContratoId(editingInspection.contratoId || "");
-      setAtividade(initialTipo);
-      setTipo(initialTipo);
-      setPotencial(editingInspection.potencial || "LEVE" as any);
-      setDescricao(editingInspection.descricao || "");
-      setAcaoCorretiva(editingInspection.acaoCorretiva || "");
-      setResponsavel(editingInspection.responsavel || "");
-      setPrazo(editingInspection.prazo || "");
-      setStatus(editingInspection.status || "ABERTO" as any);
-      setObservacoes(editingInspection.observacoes || "");
-      setFotosAntes(editingInspection.fotosAntes || []);
-      setFotosDepois(editingInspection.fotosDepois || []);
-      setTemaDSS(editingInspection.temaDSS || "");
-      setQuantidadeParticipantes(editingInspection.quantidadeParticipantes ?? "");
-      setDataConclusao(editingInspection.dataConclusao || "");
-    } else {
-      // Check for saved local draft first
-      const userId = currentUser?.id || "anon";
-      getInspectionDraft(userId).then((draft) => {
-        if (isCancelled) return;
-        if (draft && (draft.descricao || draft.temaDSS || draft.acaoCorretiva || draft.fotosAntes?.length || draft.observacoes)) {
-          setData(draft.data || new Date().toISOString().split("T")[0]);
-          setSupervisorId(draft.supervisorId || "");
-          setAreaId(draft.areaId || areas[0]?.id || "");
-          setContratoId(draft.contratoId || contracts[0]?.id || "");
-          const restoredTipo = draft.tipoLancamento || draft.tipo || draft.atividade || "DSS";
-          setAtividade(restoredTipo);
-          setTipo(restoredTipo);
-          setPotencial((draft.potencial as Potential) || Potential.LEVE);
-          setDescricao(draft.descricao || "");
-          setAcaoCorretiva(draft.acaoCorretiva || "");
-          setResponsavel(draft.responsavel || "");
-          setPrazo(draft.prazo || new Date().toISOString().split("T")[0]);
-          setStatus((draft.status as InspectionStatus) || InspectionStatus.ABERTO);
-          setObservacoes(draft.observacoes || "");
-          setFotosAntes(draft.fotosAntes || []);
-          setFotosDepois(draft.fotosDepois || []);
-          setTemaDSS(draft.temaDSS || "");
-          setQuantidadeParticipantes(draft.quantidadeParticipantes ?? "");
-          setDataConclusao(draft.dataConclusao || "");
-          setDraftRestored(true);
-        } else {
-          // Set defaults for new inspection
-          setData(new Date().toISOString().split("T")[0]);
-          
-          let initialSupId = "";
-          if (currentUser) {
-            const isOp = isOperationalRole(currentUser.perfil);
-            const matchedSup = supervisors.find(
-              (s) => s.id === currentUser.id || (s.email && currentUser.email && s.email.trim().toLowerCase() === currentUser.email.trim().toLowerCase())
-            );
-            if (matchedSup) {
-              initialSupId = matchedSup.id;
-            } else if (isOp) {
-              initialSupId = currentUser.id;
-            }
-          }
-          setSupervisorId(initialSupId);
-          setAreaId(areas[0]?.id || "");
-          setContratoId(contracts[0]?.id || "");
-          setAtividade("DSS");
-          setTipo("DSS");
-          setPotencial(Potential.LEVE);
-          setDescricao("");
-          setAcaoCorretiva("");
-          setResponsavel("");
-          setPrazo(new Date().toISOString().split("T")[0]);
-          setStatus(InspectionStatus.ABERTO);
-          setObservacoes("");
-          setFotosAntes([]);
-          setFotosDepois([]);
-          setTemaDSS("");
-          setQuantidadeParticipantes("");
-          setDataConclusao("");
-        }
+    let cancelled = false;
+    setReadyScope("");
+    suppressed.current = false;
+    getInspectionDraft(userId, editId).then(draft => {
+      if (cancelled) return;
+      const currentSupervisor = supervisors.find(s => supervisorMatchesId(s, currentUser?.id) ||
+        (s.email && currentUser?.email && s.email.toLowerCase() === currentUser.email.toLowerCase()));
+      const original = editingInspection;
+      const source = draft || original;
+      recordId.current = original?.id || draft?.id || `insp_${crypto.randomUUID()}`;
+      setData(getNormalizedInspectionDate(source?.data) || getOperationalDateKey());
+      setSupervisorId(source?.supervisorId || currentSupervisor?.id || (isOperationalRole(currentUser?.perfil) ? userId : ""));
+      setAreaId(source?.areaId || areas[0]?.id || "");
+      setContratoId(source?.contratoId || contracts[0]?.id || "");
+      const selectedType = source ? getTipoLancamento(source.atividade, source.tipo, source.tipoLancamento) : "DSS";
+      setAtividade(selectedType); setTipo(selectedType);
+      setPotencial(source?.potencial || Potential.LEVE);
+      setDescricao(source?.descricao || ""); setAcaoCorretiva(source?.acaoCorretiva || "");
+      setResponsavel(source?.responsavel || ""); setPrazo(getNormalizedInspectionDate(source?.prazo) || getOperationalDateKey());
+      setStatus(source?.status || InspectionStatus.ABERTO); setObservacoes(source?.observacoes || "");
+      setFotosAntes(source?.fotosAntes || []); setFotosDepois(source?.fotosDepois || []);
+      setTemaDSS(source?.temaDSS || ""); setQuantidadeParticipantes(source?.quantidadeParticipantes ?? "");
+      setDataConclusao(getNormalizedInspectionDate(source?.dataConclusao) || "");
+      setDraftRestored(!!draft); setReadyScope(scope);
+      if (draft?.scrollTop) requestAnimationFrame(() => {
+        if (!cancelled) { const main = document.querySelector("main"); if (main) main.scrollTop = draft.scrollTop!; }
       });
-    }
+    }).catch(() => { if (!cancelled) setDraftError("Não foi possível recuperar o rascunho. Não limpe o armazenamento do navegador."); });
+    return () => { cancelled = true; };
+  }, [scope]);
 
-    return () => {
-      isCancelled = true;
+  if (readyScope === scope) {
+    draftRef.current = {
+      id: recordId.current, data, supervisorId, areaId, contratoId,
+      grupoContrato: getGrupoContratoPorLocalidade(areaId, areas, contracts),
+      atividade, tipo, tipoLancamento: getTipoLancamento(atividade, tipo), potencial,
+      descricao, acaoCorretiva, responsavel, prazo, status, observacoes, fotosAntes, fotosDepois,
+      temaDSS, quantidadeParticipantes, dataConclusao, scrollTop: draftRef.current?.scrollTop || 0
     };
-  }, [editingInspection, supervisors, areas, contracts, config, currentUser]);
-
-  // Auto-save draft on form change (debounced 1000ms)
+  }
+  const persistDraft = () => {
+    if (suppressed.current || readyScope !== scope || !draftRef.current) return;
+    void saveInspectionDraft(userId, draftRef.current, editId).then(() => {
+      if (mounted.current) { setDraftError(""); setLastSavedDraftTime(new Date().toLocaleTimeString("pt-BR")); }
+    }).catch(() => { if (mounted.current) setDraftError("Não foi possível salvar o rascunho neste dispositivo. Mantenha esta tela aberta."); });
+  };
+  const persistRef = useRef(persistDraft);
+  persistRef.current = persistDraft;
   useEffect(() => {
-    if (editingInspection) return; // Do not auto-save when editing existing records
-    const userId = currentUser?.id || "anon";
-    const hasContent = !!(descricao || acaoCorretiva || responsavel || temaDSS || fotosAntes.length > 0 || fotosDepois.length > 0 || observacoes);
-    if (!hasContent) return;
-
-    const timer = setTimeout(() => {
-      const grupoContrato = getGrupoContratoPorLocalidade(areaId, areas, contracts);
-      saveInspectionDraft(userId, {
-        data,
-        supervisorId,
-        areaId,
-        contratoId,
-        grupoContrato,
-        atividade,
-        tipo,
-        tipoLancamento: getSelectedValue(),
-        potencial,
-        descricao,
-        acaoCorretiva,
-        responsavel,
-        prazo,
-        status,
-        observacoes,
-        fotosAntes,
-        fotosDepois,
-        temaDSS,
-        quantidadeParticipantes: quantidadeParticipantes === "" ? undefined : Number(quantidadeParticipantes),
-        dataConclusao
-      }).then(() => {
-        const now = new Date();
-        setLastSavedDraftTime(`${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}:${String(now.getSeconds()).padStart(2, "0")}`);
-      });
-    }, 1000);
-
+    if (readyScope !== scope || suppressed.current) return;
+    const timer = window.setTimeout(() => persistRef.current(), 350);
     return () => clearTimeout(timer);
-  }, [
-    data, supervisorId, areaId, contratoId, atividade, tipo, potencial,
-    descricao, acaoCorretiva, responsavel, prazo, status, observacoes,
-    fotosAntes, fotosDepois, temaDSS, quantidadeParticipantes, dataConclusao,
-    editingInspection, currentUser?.id
-  ]);
+  }, [readyScope, scope, data, supervisorId, areaId, contratoId, atividade, tipo, potencial,
+    descricao, acaoCorretiva, responsavel, prazo, status, observacoes, fotosAntes, fotosDepois,
+    temaDSS, quantidadeParticipantes, dataConclusao]);
+  useEffect(() => {
+    mounted.current = true;
+    const flush = () => persistRef.current();
+    const hide = () => { if (document.visibilityState === "hidden") flush(); };
+    const main = document.querySelector("main");
+    const scroll = () => { if (draftRef.current) draftRef.current.scrollTop = main?.scrollTop || 0; };
+    window.addEventListener("pagehide", flush); document.addEventListener("visibilitychange", hide);
+    main?.addEventListener("scroll", scroll, { passive: true });
+    return () => {
+      mounted.current = false; flush();
+      window.removeEventListener("pagehide", flush); document.removeEventListener("visibilitychange", hide);
+      main?.removeEventListener("scroll", scroll);
+    };
+  }, []);
 
   const handleDiscardDraft = async () => {
-    const userId = currentUser?.id || "anon";
-    await deleteInspectionDraft(userId);
-    setDraftRestored(false);
-    setLastSavedDraftTime(null);
-    setDescricao("");
-    setAcaoCorretiva("");
-    setResponsavel("");
-    setObservacoes("");
-    setFotosAntes([]);
-    setFotosDepois([]);
-    setTemaDSS("");
-    setQuantidadeParticipantes("");
-    setDataConclusao("");
+    if (!window.confirm("Descartar o preenchimento deste formulário? A inspeção gravada no banco não será apagada.")) return;
+    suppressed.current = true;
+    try {
+      await deleteInspectionDraft(userId, editId);
+      draftRef.current = null; setLastSavedDraftTime(null); setDraftRestored(false);
+      setResetVersion(value => value + 1);
+    } catch { suppressed.current = false; setDraftError("Não foi possível descartar o rascunho."); }
   };
 
   // Resolve matching label for select element
@@ -389,6 +334,7 @@ export default function LancarInspecaoView({
   // Save/Submit Form handler
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submitLock.current || readyScope !== scope) return;
     setError("");
 
     const currentLaunchType = getSelectedValue();
@@ -431,17 +377,22 @@ export default function LancarInspecaoView({
     }
 
     // Authorship fields: preserve on edit, populate on new
-    const uid = editingInspection?.criadoPorUid || currentUser?.id || auth.currentUser?.uid || "";
-    const nome = editingInspection?.criadoPorNome || currentUser?.nome || auth.currentUser?.displayName || "Usuário";
-    const email = editingInspection?.criadoPorEmail || currentUser?.email || auth.currentUser?.email || "";
+    const uid = editingInspection ? editingInspection.criadoPorUid : (currentUser?.id || auth?.currentUser?.uid || "");
+    const nome = editingInspection ? editingInspection.criadoPorNome : (currentUser?.nome || auth?.currentUser?.displayName || "Usuário");
+    const email = editingInspection ? editingInspection.criadoPorEmail : (currentUser?.email || auth?.currentUser?.email || "");
 
+    const selectedSupervisor = supervisors.find(s => supervisorMatchesId(s, supervisorId));
     const finalInspection: Inspection = {
-      id: editingInspection?.id || "insp_" + Math.random().toString(36).substring(2, 9),
-      data,
+      ...editingInspection,
+      id: editingInspection?.id || recordId.current,
+      data: editingInspection && data === getNormalizedInspectionDate(editingInspection.data) ? editingInspection.data : data,
+      supervisorNome: selectedSupervisor?.nome || editingInspection?.supervisorNome,
+      supervisorEmail: selectedSupervisor?.email || editingInspection?.supervisorEmail,
       supervisorId,
       areaId,
       contratoId,
-      grupoContrato: getGrupoContratoPorLocalidade(areaId, areas, contracts),
+      grupoContrato: editingInspection && areaId === editingInspection.areaId && contratoId === editingInspection.contratoId
+        ? editingInspection.grupoContrato : getGrupoContratoPorLocalidade(areaId, areas, contracts),
       tipoLancamento: currentLaunchType,
       tipo: currentLaunchType,
       atividade: currentLaunchType,
@@ -451,7 +402,7 @@ export default function LancarInspecaoView({
       potencial: (isDSS || isPresenca) ? Potential.LEVE : potencial,
       descricao,
       acaoCorretiva: isPresenca ? "Presença em campo registrada" : (isDSS ? "Realizado DSS em campo" : acaoCorretiva),
-      responsavel: (isDSS || isPresenca) ? (supervisors.find(s => s.id === supervisorId)?.nome || "Supervisor") : responsavel,
+      responsavel: (isDSS || isPresenca) ? (selectedSupervisor?.nome || editingInspection?.supervisorNome || "Supervisor") : responsavel,
       prazo: (isDSS || isPresenca) ? data : prazo,
       status: (isDSS || isPresenca) ? InspectionStatus.CONCLUIDO : status,
       observacoes: observacoes || null,
@@ -469,25 +420,28 @@ export default function LancarInspecaoView({
 
     // Validate that the document size never exceeds 1 MiB of Firestore limit
     const serializedDoc = JSON.stringify(finalInspection);
-    const docSizeBytes = serializedDoc.length;
+    const docSizeBytes = new TextEncoder().encode(serializedDoc).byteLength;
     const oneMiB = 1024 * 1024;
     if (docSizeBytes > oneMiB) {
       return setError("As fotos ultrapassaram o limite permitido. Remova uma foto ou escolha imagens menores.");
     }
 
+    submitLock.current = true;
     setIsSaving(true);
+    persistRef.current();
     try {
       await onSave(finalInspection);
-      if (!editingInspection) {
-        await deleteInspectionDraft(currentUser?.id || "anon");
-        setDraftRestored(false);
-        setLastSavedDraftTime(null);
-      }
+      suppressed.current = true;
+      try { await deleteInspectionDraft(userId, editId); }
+      catch { setDraftError("Inspeção salva; não foi possível limpar o rascunho local."); }
+      setDraftRestored(false); setLastSavedDraftTime(null);
+      if (mounted.current) onCancel();
     } catch (err: any) {
       console.error(err);
       setError(err?.message || "Erro ao salvar a inspeção no banco de dados.");
     } finally {
-      setIsSaving(false);
+      submitLock.current = false;
+      if (mounted.current) setIsSaving(false);
     }
   };
 
@@ -502,6 +456,7 @@ export default function LancarInspecaoView({
         <div className="flex items-center gap-3">
           <button
             onClick={onCancel}
+            disabled={isSaving}
             className="p-1.5 rounded-lg bg-gray-50 hover:bg-gray-100 text-gray-600 transition-colors cursor-pointer"
           >
             <ArrowLeft size={16} />
@@ -517,7 +472,7 @@ export default function LancarInspecaoView({
         </div>
 
         {/* Auto-save status indicator */}
-        {!editingInspection && lastSavedDraftTime && (
+        {lastSavedDraftTime && (
           <div className="flex items-center gap-1.5 text-[11px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-lg shadow-2xs">
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
             Rascunho salvo às {lastSavedDraftTime}
@@ -526,7 +481,7 @@ export default function LancarInspecaoView({
       </div>
 
       {/* DRAFT RESTORED ALERT BANNER */}
-      {draftRestored && !editingInspection && (
+      {draftRestored && (
         <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-xl text-amber-900 text-xs font-semibold flex items-center justify-between gap-3 shadow-2xs">
           <div className="flex items-center gap-2">
             <History size={16} className="text-[#F58220] shrink-0" />
@@ -538,6 +493,7 @@ export default function LancarInspecaoView({
           <button
             type="button"
             onClick={handleDiscardDraft}
+            disabled={isSaving}
             className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-extrabold text-red-700 bg-white hover:bg-red-50 border border-red-200 rounded-lg transition-colors cursor-pointer shrink-0"
           >
             <Trash2 size={12} /> Descartar rascunho
@@ -552,8 +508,11 @@ export default function LancarInspecaoView({
         </div>
       )}
 
+      {draftError && <div role="alert" className="rounded-lg bg-amber-50 p-3 text-sm text-amber-900">{draftError}</div>}
+      {readyScope !== scope && <p role="status">Recuperando formulário…</p>}
       {/* MAIN FORM */}
       <form onSubmit={handleSubmit} className="bg-white rounded-xl shadow-sm border border-gray-100 p-6 space-y-6">
+        <fieldset disabled={readyScope !== scope || isSaving} className="space-y-6">
         {/* Section 1: Dados Gerais */}
         <div className="space-y-4">
           <div className="flex items-center gap-2 pb-2 border-b border-gray-50">
@@ -599,6 +558,9 @@ export default function LancarInspecaoView({
                 className="text-xs bg-gray-50 border border-gray-200 rounded-lg p-2.5 text-gray-700 focus:outline-none focus:ring-1 focus:ring-[#0B2E59] disabled:bg-gray-100 disabled:text-gray-400"
               >
                 <option value="">Selecione...</option>
+                {supervisorId && !supervisors.some(s => s.id === supervisorId) && (
+                  <option value={supervisorId}>{supervisors.find(s => supervisorMatchesId(s, supervisorId))?.nome || editingInspection?.supervisorNome || "Responsável histórico — vínculo preservado"}</option>
+                )}
                 {supervisors.map((s) => (
                   <option key={s.id} value={s.id}>
                     {s.nome}
@@ -984,7 +946,7 @@ export default function LancarInspecaoView({
         </div>
 
         {/* Buttons Action footer */}
-        <div className="border-t border-gray-100 pt-5 flex flex-col gap-3">
+        <div className="inspection-actions border-t border-gray-100 pt-5 flex flex-col gap-3">
           {error && (
             <div className="p-3 bg-red-50 border-l-4 border-red-500 rounded-r-lg text-red-700 text-xs font-semibold flex items-center gap-2 self-end max-w-lg">
               <AlertTriangle size={14} className="shrink-0 animate-pulse" />
@@ -1024,6 +986,7 @@ export default function LancarInspecaoView({
             </button>
           </div>
         </div>
+        </fieldset>
       </form>
     </div>
   );

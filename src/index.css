@@ -453,17 +453,15 @@ body {
 /* System Footer and Developer Credit Styles */
 
 .app-footer {
-  position: fixed !important;
-  bottom: 0 !important;
-  right: 0 !important;
-  height: 48px !important;
-  max-height: 48px !important;
+  position: relative !important;
+  flex: 0 0 auto !important;
+  min-height: 48px !important;
   z-index: 30 !important;
   display: flex !important;
   align-items: center !important;
   justify-content: space-between !important;
   gap: 16px !important;
-  padding: 0 16px !important;
+  padding: 0 16px env(safe-area-inset-bottom, 0px) !important;
   overflow: hidden !important;
   white-space: nowrap !important;
   box-sizing: border-box !important;
@@ -530,9 +528,8 @@ body {
 
 @media (max-width: 768px) {
   .app-footer {
-    height: 44px !important;
-    max-height: 44px !important;
-    padding: 0 10px !important;
+    min-height: 44px !important;
+    padding: 0 10px env(safe-area-inset-bottom, 0px) !important;
     font-size: 9.5px !important;
     gap: 8px !important;
     justify-content: space-between !important;
@@ -562,9 +559,6 @@ body {
     font-size: 9px !important;
   }
 
-  main {
-    padding-bottom: 64px !important;
-  }
 
   html, body, #root, .flex-1 {
     max-width: 100% !important;
@@ -578,3 +572,7 @@ body {
   }
 }
 
+
+/* The footer reserves its own row; no form action can be covered. */
+.app-shell { height: 100dvh; }
+.inspection-actions { position: sticky; bottom: 0; z-index: 10; background: white; padding-bottom: 12px; }

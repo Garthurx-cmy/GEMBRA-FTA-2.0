@@ -26,6 +26,8 @@ export interface Inspection {
   id: string;
   data: string;
   supervisorId: string;
+  supervisorNome?: string;
+  supervisorEmail?: string;
   areaId: string;
   contratoId: string;
   grupoContrato?: GrupoContrato;
@@ -77,10 +79,12 @@ export interface InspectionDraft {
   quantidadeParticipantes: number | "" | null;
   dataConclusao: string;
   savedAt?: string;
+  scrollTop?: number;
 }
 
 export interface Supervisor {
   id: string;
+  legacyIds?: string[];
   nome: string;
   email?: string;
   unidade?: string;
@@ -295,4 +299,3 @@ export interface LegacyReconciliationPreview {
   naoClassificados: number;
   items: LegacyReconciliationItem[];
 }
-

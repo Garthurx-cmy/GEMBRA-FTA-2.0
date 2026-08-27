@@ -1,155 +1,99 @@
-/**
- * @license
- * SPDX-License-Identifier: Apache-2.0
- */
+import { Inspection, Supervisor, UserProfile } from "../types";
 
-import { Supervisor, UserProfile } from "../types";
-
-export const normalizeText = (value = ""): string =>
-  value
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, " ");
+export const normalizeText = (value = ""): string => String(value || "")
+  .normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim().toLowerCase().replace(/\s+/g, " ");
+const emailKey = (value?: string) => (value || "").trim().toLowerCase();
 
 export function isOperationalRole(role?: string): boolean {
-  if (!role) return false;
-  const r = role.trim().toLowerCase();
-  return (
-    r === "supervisor" ||
-    r === "líder de equipe" ||
-    r === "lider de equipe" ||
-    r === "lider_equipe" ||
-    r === "lider" ||
-    r === "líder" ||
-    r === "lider de equipe - mec" ||
-    r === "líder de equipe - mecânica"
-  );
+  const value = normalizeText(role).replace(/_/g, " ");
+  return value === "supervisor" || value === "lider" || value.startsWith("lider de equipe");
 }
 
-/**
- * Cria a lista unificada de responsáveis operacionais combinando:
- * 1. Supervisores ativos da coleção `supervisors`
- * 2. Usuários ativos da coleção `users` com perfil operacional (supervisor, líder de equipe)
- * 3. O `currentUser` (se ativo e com perfil operacional)
- * 
- * Remove duplicidades por:
- * - UID / ID
- * - E-mail em minúsculas
- * - Nome normalizado
- */
-export function buildUnifiedSupervisors(
-  rawSupervisors: Supervisor[] = [],
-  users: UserProfile[] = [],
-  currentUser?: UserProfile | null
-): Supervisor[] {
-  const result: Supervisor[] = [];
-  const seenIds = new Set<string>();
-  const seenEmails = new Set<string>();
-  const seenNames = new Set<string>();
+export function supervisorMatchesId(supervisor: Supervisor, id?: string): boolean {
+  return !!id && (supervisor.id === id || !!supervisor.legacyIds?.includes(id));
+}
 
-  const addIfUnique = (item: Supervisor) => {
-    if (!item || !item.id) return;
-    const normId = item.id.trim();
-    const normEmail = item.email ? item.email.trim().toLowerCase() : "";
-    const normName = normalizeText(item.nome || "");
-
-    if (!normId && !normName) return;
-
-    if (seenIds.has(normId)) return;
-    if (normEmail && seenEmails.has(normEmail)) return;
-    if (normName && seenNames.has(normName)) return;
-
-    seenIds.add(normId);
-    if (normEmail) seenEmails.add(normEmail);
-    if (normName) seenNames.add(normName);
-
-    result.push(item);
-  };
-
-  // 1. Supervisores ativos da coleção supervisors
-  for (const s of rawSupervisors) {
-    if (s.ativo !== false) {
-      const matchingUser = users.find(
-        (u) =>
-          u.id === s.id ||
-          (u.email && s.email && u.email.trim().toLowerCase() === s.email.trim().toLowerCase()) ||
-          (normalizeText(u.nome) === normalizeText(s.nome))
-      );
-
-      const isFarolDisabled = s.participaFarolGemba === false || matchingUser?.participaFarolGemba === false;
-
-      addIfUnique({
-        ...s,
-        ativo: true,
-        cargo: s.cargo || matchingUser?.cargo || matchingUser?.perfil || s.unidade || "Supervisor",
-        perfil: s.perfil || matchingUser?.perfil || "Supervisor",
-        participaFarolGemba: !isFarolDisabled,
-        gruposContratoPermitidos: s.gruposContratoPermitidos || matchingUser?.gruposContratoPermitidos
-      });
-    }
-  }
-
-  // 2. Usuários ativos da coleção users com perfil operacional
+/** Merge only confirmed identities (ID or email). Names alone do not merge accounts. */
+export function buildUnifiedSupervisors(rawSupervisors: Supervisor[] = [], users: UserProfile[] = [], currentUser?: UserProfile | null): Supervisor[] {
   const allUsers = [...users];
-  if (currentUser && !allUsers.some((u) => u.id === currentUser.id)) {
-    allUsers.push(currentUser);
+  if (currentUser && !allUsers.some(u => u.id === currentUser.id)) allUsers.push(currentUser);
+  const result: Supervisor[] = [];
+  const add = (item: Supervisor) => {
+    if (!item?.id) return;
+    const matches = result.filter(s => supervisorMatchesId(s, item.id) ||
+      (emailKey(item.email) && emailKey(s.email) === emailKey(item.email)));
+    if (matches.length > 1) return; // Conflicting identity: do not guess.
+    const previous = matches[0];
+    if (!previous) { result.push({ ...item, legacyIds: [...(item.legacyIds || [])] }); return; }
+    const aliases = [...new Set([previous.id, item.id, ...(previous.legacyIds || []), ...(item.legacyIds || [])])];
+    Object.assign(previous, { ...previous, ...item,
+      metaSemanal: item.metaSemanal ?? previous.metaSemanal,
+      metaMensal: item.metaMensal ?? previous.metaMensal,
+      participaFarolGemba: item.participaFarolGemba ?? previous.participaFarolGemba,
+      gruposContratoPermitidos: item.gruposContratoPermitidos ?? previous.gruposContratoPermitidos,
+      legacyIds: aliases.filter(id => id !== item.id)
+    });
+  };
+  for (const sup of rawSupervisors) {
+    const owners = allUsers.filter(u => u.id === sup.id ||
+      (emailKey(u.email) && emailKey(u.email) === emailKey(sup.email)));
+    const owner = owners.length === 1 ? owners[0] : undefined;
+    add({ ...sup,
+      nome: owner?.nome || sup.nome,
+      ativo: owner?.ativo ?? sup.ativo,
+      cargo: owner?.cargo || sup.cargo,
+      perfil: owner?.perfil || sup.perfil,
+      participaFarolGemba: owner?.participaFarolGemba ?? sup.participaFarolGemba,
+      gruposContratoPermitidos: owner?.gruposContratoPermitidos ?? sup.gruposContratoPermitidos
+    });
   }
-
-  for (const u of allUsers) {
-    if (Boolean(u.ativo) && isOperationalRole(u.perfil)) {
-      addIfUnique({
-        id: u.id,
-        nome: u.nome,
-        email: u.email,
-        cargo: u.cargo || u.perfil || "Supervisor",
-        perfil: u.perfil,
-        ativo: Boolean(u.ativo),
-        participaFarolGemba: u.participaFarolGemba,
-        gruposContratoPermitidos: u.gruposContratoPermitidos
-      });
-    }
+  for (const user of allUsers) {
+    if (!isOperationalRole(user.perfil)) continue;
+    add({ id: user.id, nome: user.nome, email: user.email, cargo: user.cargo, perfil: user.perfil,
+      ativo: user.ativo, participaFarolGemba: user.participaFarolGemba,
+      gruposContratoPermitidos: user.gruposContratoPermitidos });
   }
-
-  // Ordenar alfabeticamente por nome
-  return result.sort((a, b) => (a.nome || "").localeCompare(b.nome || ""));
+  return result.filter(s => s.ativo !== false).sort((a,b) => (a.nome || "").localeCompare(b.nome || "", "pt-BR"));
 }
 
-/**
- * Busca o nome pelo supervisorId na seguinte ordem de prioridade:
- * 1. Coleção supervisors (ou lista unificada)
- * 2. Coleção users
- * 3. currentUser
- * 4. deletedNames
- * 5. Fallback padrão "Outros"
- */
-export function resolveSupervisorName(
-  supervisorId: string,
-  supervisors: Supervisor[] = [],
-  users: UserProfile[] = [],
-  currentUser?: UserProfile | null,
-  deletedNames: Record<string, string> = {}
-): string {
-  if (!supervisorId) return "Outros";
-
-  // 1. Coleção supervisors / lista de supervisores
-  const foundSup = supervisors.find((s) => s.id === supervisorId);
-  if (foundSup && foundSup.nome) return foundSup.nome;
-
-  // 2. Coleção users
-  const foundUser = users.find((u) => u.id === supervisorId);
-  if (foundUser && foundUser.nome) return foundUser.nome;
-
-  // 3. Usuário autenticado atual
-  if (currentUser && currentUser.id === supervisorId && currentUser.nome) {
-    return currentUser.nome;
+export function resolveInspectionSupervisor(inspection: Partial<Inspection>, supervisors: Supervisor[], deletedNames: Record<string,string> = {}): Supervisor | undefined {
+  const direct = supervisors.filter(s => supervisorMatchesId(s, inspection.supervisorId));
+  if (direct.length) return direct.length === 1 ? direct[0] : undefined;
+  const storedEmail = emailKey(inspection.supervisorEmail);
+  if (storedEmail) {
+    const byEmail = supervisors.filter(s => emailKey(s.email) === storedEmail);
+    if (byEmail.length) return byEmail.length === 1 ? byEmail[0] : undefined;
   }
+  const historicName = normalizeText(inspection.supervisorNome || deletedNames[inspection.supervisorId || ""] || "");
+  if (!historicName) return undefined;
+  const byExactName = supervisors.filter(s => normalizeText(s.nome) === historicName);
+  // Require an exact, unambiguous historical name, never partial/fuzzy names or the author.
+  return byExactName.length === 1 ? byExactName[0] : undefined;
+}
 
-  // 4. Nomes deletados
-  if (deletedNames && deletedNames[supervisorId]) {
-    return deletedNames[supervisorId];
+export function attachHistoricalSupervisorAliases(supervisors: Supervisor[], inspections: Inspection[], deletedNames: Record<string,string> = {}): Supervisor[] {
+  const result = supervisors.map(s => ({...s, legacyIds: [...(s.legacyIds || [])]}));
+  const candidates = new Map<string, Set<string>>();
+  for (const inspection of inspections) {
+    if (!inspection.supervisorId) continue;
+    const match = resolveInspectionSupervisor(inspection, supervisors, deletedNames);
+    if (!match) continue;
+    const ids = candidates.get(inspection.supervisorId) || new Set<string>();
+    ids.add(match.id); candidates.set(inspection.supervisorId, ids);
   }
+  for (const [oldId, ids] of candidates) {
+    if (ids.size !== 1) continue;
+    const sup = result.find(s => s.id === [...ids][0]);
+    if (sup && sup.id !== oldId && !sup.legacyIds.includes(oldId)) sup.legacyIds.push(oldId);
+  }
+  return result;
+}
 
-  return "Outros";
+export function inspectionBelongsToSupervisor(inspection: Inspection, supervisor: Supervisor, supervisors: Supervisor[], deletedNames: Record<string,string> = {}): boolean {
+  return resolveInspectionSupervisor(inspection, supervisors, deletedNames)?.id === supervisor.id;
+}
+
+export function resolveSupervisorName(id: string, supervisors: Supervisor[] = [], users: UserProfile[] = [], currentUser?: UserProfile | null, deletedNames: Record<string,string> = {}): string {
+  return supervisors.find(s => supervisorMatchesId(s,id))?.nome || users.find(u => u.id === id)?.nome ||
+    (currentUser?.id === id ? currentUser.nome : "") || deletedNames[id] || "Responsável não identificado";
 }

@@ -1,5 +1,5 @@
 // Test-only in-memory adapter. Never connected to Firebase.
-export const state = { docs: new Map<string, any>(), observers: [] as any[], writes: [] as any[], failPrefix: "", autoEmit: false };
+export const state = { docs: new Map<string, any>(), observers: [] as any[], writes: [] as any[], failPrefix: "", autoEmit: false, deletes: [] as string[], reads: [] as string[] };
 export class Sentinel { toDate() { return new Date(); } }
 export const serverTimestamp = () => new Sentinel();
 export const deleteField = () => new Sentinel();
@@ -33,7 +33,7 @@ export async function setDoc(ref: any, data: any, options?: any) {
   if (state.autoEmit) { emit(ref.path); emit(ref.path.split("/").slice(0,-1).join("/")); }
 }
 export const updateDoc = (ref: any, data: any) => setDoc(ref, data, { merge: true });
-export async function deleteDoc(ref: any) { state.docs.delete(ref.path); }
+export async function deleteDoc(ref: any) { state.deletes.push(ref.path); state.docs.delete(ref.path); }
 export async function getDoc(ref: any) { return snapshot(ref); }
-export async function getDocs(ref: any) { return snapshot(ref); }
+export async function getDocs(ref: any) { state.reads.push(ref.path); return snapshot(ref); }
 export const writeBatch = () => ({ set: () => {}, update: () => {}, delete: () => {}, commit: async () => {} });

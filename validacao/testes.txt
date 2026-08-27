@@ -1,0 +1,22 @@
+✔ Admin receives all 400 records including 385 without grupoContrato without changing IDs (26.730979ms)
+✔ manager and normalized administrator roles include legacy history (10.229569ms)
+✔ single-contract users retain origin filtering and do not list users (4.114613ms)
+✔ non-manager dual-contract user remains constrained to classified groups (3.438981ms)
+✔ absent/inactive profiles never start a listener; empty permissions never grant all records (2.021369ms)
+✔ starting data synchronization and snapshots never reconcile, write, or delete (12.844935ms)
+✔ explicit directory reconciliation preserves old supervisor documents and inspection IDs (2.264947ms)
+✔ read error preserves last received records and is not treated as successful synchronization (8.075785ms)
+✔ empty initial cache is not proof of empty history (1.331228ms)
+✔ cache snapshot and pending writes are not advertised as server-confirmed history (9.663073ms)
+✔ genuinely empty server snapshot is represented explicitly (0.325679ms)
+✔ month filters retain historical records and the diagnostics expose raw monthly counts (5.077618ms)
+✔ history has no arbitrary 1000-record cap and startup stays idempotent (4.10775ms)
+✔ unresolved supervisor IDs are reported without rewriting them (2.300612ms)
+ℹ tests 14
+ℹ suites 0
+ℹ pass 14
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 314.446254

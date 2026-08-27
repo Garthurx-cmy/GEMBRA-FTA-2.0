@@ -1,0 +1,3 @@
+Comando executado: node node_modules/typescript/bin/tsc --noEmit
+Resultado: exit code 0, sem erros.
+Saida do compilador:

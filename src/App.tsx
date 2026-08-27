@@ -9,14 +9,14 @@ import { onAuthStateChanged, signInWithEmailAndPassword, signOut, setPersistence
 import { doc, getDoc, onSnapshot, updateDoc as fbUpdateDoc, serverTimestamp } from "firebase/firestore";
 
 const updateDoc = async (ref: any, data: any) => {
-  if (import.meta.env.DEV) {
+  if (process.env.NODE_ENV !== "production") {
     const path = ref && typeof ref.path === "string" ? ref.path : "unknown-path";
     console.trace("[FIRESTORE WRITE]", path, "updateDoc", data);
   }
   return fbUpdateDoc(ref, data);
 };
 import { dbService, normalizeUserProfile, hasLegacyUppercaseFields } from "./services/db";
-import { attachHistoricalSupervisorAliases, buildUnifiedSupervisors, resolveSupervisorName } from "./utils/supervisors";
+import { buildUnifiedSupervisors, resolveSupervisorName } from "./utils/supervisors";
 import {
   Inspection,
   Supervisor,
@@ -45,17 +45,7 @@ import { CheckCircle, AlertCircle, Building2, Bell, Search, FileText, X, Externa
 export default function App() {
   const [activeTab, setActiveTab] = useState<string>("dashboard");
 
-  // Remove dados deixados pelas versoes antigas, que usavam localStorage como
-  // banco e podiam exibir usuarios duplicados. A sessao oficial do Firebase
-  // usa chaves proprias e nao e afetada por esta limpeza.
-  useEffect(() => {
-    const legacyKeys: string[] = [];
-    for (let index = 0; index < window.localStorage.length; index += 1) {
-      const key = window.localStorage.key(index);
-      if (key?.startsWith("gemba_fta_")) legacyKeys.push(key);
-    }
-    legacyKeys.forEach((key) => window.localStorage.removeItem(key));
-  }, []);
+  // Preserve legacy browser data for incident analysis; do not import it into Firestore.
 
   // --- DATABASE STATES ---
   const [inspections, setInspections] = useState<Inspection[]>([]);
@@ -69,7 +59,9 @@ export default function App() {
 
   // --- VISIBILITY & SYNC STATES ---
   const [isOnline, setIsOnline] = useState(navigator.onLine);
-  const [, setSyncRevision] = useState(0);
+  const [isVisible, setIsVisible] = useState(document.visibilityState === "visible");
+  const [inspectionSyncInfo, setInspectionSyncInfo] = useState(() => dbService.getInspectionSyncInfo());
+  const isSyncing = inspectionSyncInfo.status === "loading" || inspectionSyncInfo.status === "cache" || inspectionSyncInfo.status === "pending";
 
   // --- SPECIAL INTERACTIVE STATES ---
   const [editingInspection, setEditingInspection] = useState<Inspection | null>(null);
@@ -99,7 +91,6 @@ export default function App() {
 
   const permittedGruposContrato: GrupoContrato[] = useMemo(() => {
     if (!currentUser) return ["vale", "vli"];
-    if (["Administrador", "Desenvolvedor/Admin", "Gestor"].includes(currentUser.perfil)) return ["vale", "vli"];
     if (currentUser.gruposContratoPermitidos && currentUser.gruposContratoPermitidos.length > 0) {
       return currentUser.gruposContratoPermitidos;
     }
@@ -126,11 +117,6 @@ export default function App() {
   }, [currentUser?.id, permittedGruposContrato]);
 
   const setGrupoContratoSelecionado = (novoGrupo: GrupoContratoFiltro) => {
-    const permitido = novoGrupo === "todos"
-      ? permittedGruposContrato.length > 1
-      : permittedGruposContrato.includes(novoGrupo);
-    if (!permitido) return;
-
     if (currentUser) {
       const storageKey = `gemba_selected_contract_${currentUser.id}`;
       try {
@@ -142,8 +128,8 @@ export default function App() {
 
   // Unified operational supervisors (collection supervisors + operational users + currentUser)
   const unifiedSupervisors = useMemo(() => {
-    return attachHistoricalSupervisorAliases(buildUnifiedSupervisors(supervisors, users, currentUser), inspections, dbService.getDeletedNames());
-  }, [supervisors, users, currentUser, inspections]);
+    return buildUnifiedSupervisors(supervisors, users, currentUser);
+  }, [supervisors, users, currentUser]);
 
   const globalSearchResults = useMemo(() => {
     const term = globalSearchTerm.trim().toLowerCase();
@@ -154,7 +140,7 @@ export default function App() {
       const contractCode = contract ? contract.codigo : "";
       const contractName = contract ? contract.nome : "";
       const area = areas.find((a) => a.id === insp.areaId)?.nome || dbService.getDeletedNames()[insp.areaId] || "";
-      const typeName = getTipoLancamento(insp.atividade, insp.tipo, insp.tipoLancamento);
+      const typeName = getTipoLancamento(insp.atividade, insp.tipo);
       
       return (
         insp.id.toLowerCase().includes(term) ||
@@ -171,13 +157,13 @@ export default function App() {
   // Fetch / Sync all local states with Database Service
   const refreshDatabaseStates = () => {
     setInspections(dbService.getInspections());
+    setInspectionSyncInfo(dbService.getInspectionSyncInfo());
     setSupervisors(dbService.getSupervisors());
     setAreas(dbService.getAreas());
     setContracts(dbService.getContracts());
     setUsers(dbService.getUsers());
     setConfig(dbService.getConfig());
     setNotifications(dbService.getNotifications());
-    setSyncRevision(value => value + 1);
   };
 
   useEffect(() => {
@@ -189,13 +175,16 @@ export default function App() {
   // Centralized Visibility, Online, and Tab Page event listeners
   useEffect(() => {
     const handleVisibilityChange = () => {
-      if (document.visibilityState === "visible") refreshDatabaseStates();
+      setIsVisible(document.visibilityState === "visible");
     };
 
     const handlePageShow = () => {
-      refreshDatabaseStates();
+      setIsVisible(true);
     };
 
+    const handlePageHide = () => {
+      setIsVisible(false);
+    };
 
     const handleOnline = () => {
       setIsOnline(true);
@@ -207,6 +196,7 @@ export default function App() {
 
     document.addEventListener("visibilitychange", handleVisibilityChange);
     window.addEventListener("pageshow", handlePageShow);
+    window.addEventListener("pagehide", handlePageHide);
     window.addEventListener("online", handleOnline);
     window.addEventListener("offline", handleOffline);
 
@@ -220,16 +210,16 @@ export default function App() {
     return () => {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("pageshow", handlePageShow);
+      window.removeEventListener("pagehide", handlePageHide);
       window.removeEventListener("online", handleOnline);
       window.removeEventListener("offline", handleOffline);
     };
   }, []);
 
-  // Visibility and network changes are handled by the SDK, without losing listeners.
-  const syncIdentity = currentUser ? JSON.stringify([currentUser.id, currentUser.perfil, currentUser.ativo,
-    [...(currentUser.gruposContratoPermitidos || [])].sort()]) : "";
+  // Keep listeners attached through tab/visibility changes. Firebase handles reconnects.
+  const syncPermissions = JSON.stringify(currentUser?.gruposContratoPermitidos || []);
   useEffect(() => {
-    if (!currentUser) {
+    if (!currentUser || currentUser.ativo === false) {
       dbService.stopSync(true);
       refreshDatabaseStates();
       return;
@@ -237,12 +227,7 @@ export default function App() {
     dbService.startSync(currentUser);
     refreshDatabaseStates();
     return () => dbService.stopSync(true);
-  }, [syncIdentity]);
-  const syncState = dbService.getSyncState(currentUser);
-  const isSyncing = isOnline && !syncState.serverReady && syncState.errors.length === 0;
-  const viewDataReady = activeTab === "lancar"
-    ? syncState.supervisorsReady && syncState.areasReady && syncState.contractsReady
-    : syncState.appDataReady;
+  }, [currentUser?.id, currentUser?.perfil, currentUser?.ativo, syncPermissions]);
 
   // Firebase Authentication is the only session source. Firestore listeners start
   // only after authentication, avoiding permission errors on the login screen.
@@ -275,7 +260,7 @@ export default function App() {
         if (cachedRaw) {
           const parsed = JSON.parse(cachedRaw);
           if (parsed && parsed.id === firebaseUser.uid && parsed.ativo) {
-            setCurrentUser(normalizeUserProfile(parsed, firebaseUser.uid));
+            setCurrentUser(parsed);
             setAuthLoading(false);
           }
         }
@@ -377,7 +362,7 @@ export default function App() {
             if (cachedRaw) {
               const parsed = JSON.parse(cachedRaw);
               if (parsed && parsed.ativo) {
-                setCurrentUser(normalizeUserProfile(parsed, firebaseUser.uid));
+                setCurrentUser(parsed);
                 setAuthLoading(false);
                 return;
               }
@@ -417,10 +402,11 @@ export default function App() {
   // Lançar / Editar Save
   const handleSaveInspection = async (inspection: Inspection) => {
     try {
-      const result = await dbService.saveInspection(inspection);
+      await dbService.saveInspection(inspection);
       refreshDatabaseStates();
-      const message = editingInspection ? "Inspeção atualizada com sucesso!" : "Nova inspeção GEMBA lançada com sucesso!";
-      triggerAlert(message + (result.warnings.length ? ` Aviso: ${result.warnings.join("; ")}. Não repita o lançamento.` : ""));
+      setEditingInspection(null);
+      triggerAlert(editingInspection ? "Inspeção atualizada com sucesso!" : "Nova inspeção GEMBA lançada com sucesso!");
+      setActiveTab("historico");
     } catch (error: any) {
       console.error(error);
       triggerAlert(error?.message || "Não foi possível salvar a inspeção.", "error");
@@ -915,7 +901,7 @@ export default function App() {
   const sidebarWidth = sidebarCollapsed ? 64 : 224;
 
   return (
-    <div className="app-shell flex h-screen overflow-hidden bg-[#f8fafc] text-gray-800 font-sans">
+    <div className="flex h-screen overflow-hidden bg-[#f8fafc] text-gray-800 font-sans">
       {/* SIDEBAR NAVIGATION */}
       <Sidebar
         activeTab={activeTab}
@@ -990,7 +976,7 @@ export default function App() {
             {globalSearchResults.length > 0 && (
               <div className="absolute left-0 right-0 mt-1.5 bg-white border border-slate-200 rounded-xl shadow-xl z-50 max-h-60 overflow-y-auto divide-y divide-slate-100 font-medium">
                 {globalSearchResults.map((insp) => {
-                  const typeName = getTipoLancamento(insp.atividade, insp.tipo, insp.tipoLancamento);
+                  const typeName = getTipoLancamento(insp.atividade, insp.tipo);
                   const conf = TIPO_LANCAMENTO_CONFIG[typeName];
                   const sup = resolveSupervisorName(insp.supervisorId, unifiedSupervisors, users, currentUser, dbService.getDeletedNames());
 
@@ -1133,23 +1119,30 @@ export default function App() {
         </header>
 
         {/* SCREEN WORKSPACE INNER CONTAINER */}
-        <main className="flex-1 min-h-0 overflow-y-auto px-4 pt-4 pb-8 md:pt-5 print:p-0">
-          <div className="max-w-7xl mx-auto min-h-full">
-            {syncState.errors.length > 0 && (
-              <div role="alert" className="mb-4 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800">
-                Falha ao atualizar dados. Os registros já recebidos foram mantidos.
-                <p className="mt-1 text-xs">{syncState.errors.map(e => `${e.collection}: ${e.code}`).join("; ")}</p>
-                <button type="button" className="mt-2 font-bold underline" onClick={() => currentUser && dbService.retrySync(currentUser)}>Tentar sincronizar novamente</button>
+        <main className="flex-1 overflow-y-auto px-4 pt-4 pb-20 md:pt-5 md:pb-20 print:p-0">
+          <div className="max-w-7xl mx-auto h-full">
+            {(currentUser?.perfil === "Desenvolvedor/Admin" || currentUser?.perfil === "Administrador" || currentUser?.perfil === "Gestor") && (
+              <section className="mb-4 rounded-xl border border-blue-200 bg-blue-50 p-4 text-xs text-blue-950" aria-label="Diagnóstico do histórico">
+                <strong>Histórico recebido: {inspectionSyncInfo.receivedCount} inspeções</strong>
+                <span> · {inspectionSyncInfo.withoutContractGroup} sem grupoContrato · origem: {inspectionSyncInfo.status === "ready" ? "servidor confirmado" : inspectionSyncInfo.status === "error" ? "erro de leitura" : "aguardando confirmação do servidor"}</span>
+                <p className="mt-1">{Object.entries(inspectionSyncInfo.byMonth).sort(([a], [b]) => b.localeCompare(a)).map(([month, count]) => `${month}: ${count}`).join(" · ") || "Aguardando leitura. Não representa histórico apagado."}</p>
+                {inspectionSyncInfo.directoryReady && inspectionSyncInfo.unresolvedSupervisorCount > 0 && (
+                  <p className="mt-1 text-amber-800">{inspectionSyncInfo.unresolvedSupervisorCount} inspeções apontam para IDs não encontrados no diretório atual. Os IDs foram preservados; o Farol exige conferência desses vínculos.</p>
+                )}
+                <p className="mt-1">Contagem da base autorizada, antes dos filtros e metas. Nenhuma inspeção é regravada por esta conferência.</p>
+              </section>
+            )}
+            {inspectionSyncInfo.status === "error" && (
+              <div role="alert" className="mb-4 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+                Não foi possível confirmar o histórico no servidor ({inspectionSyncInfo.errorCode}). Os dados já recebidos foram mantidos.
+                <button type="button" className="ml-3 underline font-bold" onClick={() => {
+                  if (currentUser) { dbService.stopSync(false); dbService.startSync(currentUser); refreshDatabaseStates(); }
+                }}>Tentar novamente</button>
               </div>
             )}
-            {!viewDataReady ? (
-              <div role="status" className="rounded-xl border bg-white p-8 text-center text-[#0B2E59]">
-                {syncState.errors.length ? "Carregamento incompleto. Confira o aviso acima." :
-                  isOnline ? "Carregando inspeções e responsáveis…" : "Sem conexão. Aguardando dados disponíveis neste dispositivo…"}
-              </div>
+            {inspectionSyncInfo.receivedCount === 0 && inspectionSyncInfo.status !== "ready" && activeTab !== "lancar" && activeTab !== "configuracoes" ? (
+              <p role="status" className="p-8 text-center text-slate-600">Aguardando confirmação do histórico. Ainda não é possível concluir que não existem inspeções.</p>
             ) : <>
-
-            
             {activeTab === "dashboard" && (
               <DashboardView
                 inspections={inspections}
@@ -1251,6 +1244,10 @@ export default function App() {
         <footer
           id="app-footer"
           className="app-footer no-print"
+          style={{
+            left: `${sidebarWidth}px`,
+            width: `calc(100% - ${sidebarWidth}px)`
+          }}
         >
           <div className="app-footer-company">
             {config.nomeEmpresa} &copy; {new Date().getFullYear()} — {config.nomeSistema}
@@ -1263,8 +1260,8 @@ export default function App() {
 
           <div className="app-footer-status">
             <span className="firebase-status">
-              <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${isOnline && syncState.serverReady ? "bg-emerald-400" : "bg-amber-400"}`}></span>
-              {!isOnline ? "OFFLINE — DADOS LOCAIS" : syncState.errors.length ? "FALHA NA SINCRONIZAÇÃO" : syncState.serverReady ? "FIREBASE SINCRONIZADO" : "SINCRONIZANDO DADOS"}
+              <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${isOnline && inspectionSyncInfo.status === "ready" ? "bg-emerald-400" : "bg-amber-400"}`}></span>
+              {!isOnline ? "OFFLINE — HISTÓRICO LOCAL" : inspectionSyncInfo.status === "ready" ? "HISTÓRICO CONFIRMADO NO SERVIDOR" : inspectionSyncInfo.status === "error" ? "ERRO AO CARREGAR HISTÓRICO" : "CARREGANDO HISTÓRICO"}
             </span>
             <span className="footer-separator">|</span>
             <span
@@ -1328,7 +1325,7 @@ export default function App() {
               {/* Categorization indicators */}
               <div className="flex flex-wrap gap-2 text-xs font-bold">
                 {(() => {
-                  const typeName = getTipoLancamento(viewingGlobalInspection.atividade, viewingGlobalInspection.tipo, viewingGlobalInspection.tipoLancamento);
+                  const typeName = getTipoLancamento(viewingGlobalInspection.atividade, viewingGlobalInspection.tipo);
                   const conf = TIPO_LANCAMENTO_CONFIG[typeName];
                   return (
                     <span className={`px-2.5 py-1 rounded border flex items-center gap-1 ${conf ? `${conf.bgClass} ${conf.textClass} ${conf.borderClass}` : "bg-gray-100 text-gray-800 border-gray-200"}`}>

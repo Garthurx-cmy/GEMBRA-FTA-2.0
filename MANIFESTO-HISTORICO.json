@@ -1,0 +1,77 @@
+{
+  "formato": "patch de arquivos para projeto existente; nao e projeto completo",
+  "data": "2026-08-27",
+  "base_arquivo": "gembra-fta-2.0 (3)(1).zip",
+  "base_zip_sha256": "e80eb9e2817a9c55ef840be6a52499937300b02c4a8faa826b127d418886131a",
+  "anterior_arquivo": "gembra-fta-2.0 (2).zip",
+  "anterior_zip_sha256": "0bc12320fdd73bd94b4715207832f9adc58df0b9fd00c031ef6ef0d540a51974",
+  "arquivos_substituidos": [
+    {
+      "caminho": "src/App.tsx",
+      "base_sha256": "99079aafb9b23494557be7437e4a6b42a3f8c7d3c7ab0517f84d7537c7ef955c",
+      "corrigido_sha256": "7f49d1fc58677b9d5dcbd7a73f94fceb54032df57448103cc782529ec29a9bfe"
+    },
+    {
+      "caminho": "src/services/db.ts",
+      "base_sha256": "bef4479a84db0d52a7d6e2bbcab2ed714b3db72a6e4125163dbe52ba0d5c16d6",
+      "corrigido_sha256": "b0478799b54b1b83b926955de5f87f5dc30ed7af722ee9c3b98c4895e605e417"
+    },
+    {
+      "caminho": "package-lock.json",
+      "base_sha256": "405c9ededcfc9df7fea6f9be8f2aa63ded33e7be95922acaad245f752bf7592b",
+      "corrigido_sha256": "ea819402f1934ef59446bb52fc086ef159103942e65d963ebf96bc7219a78272"
+    }
+  ],
+  "novos_testes": [
+    {
+      "caminho": "tests/authMock.ts",
+      "sha256": "7f83787464df18ac9440310d8548b731cfdff95a7d540db3ed84afceb141d977"
+    },
+    {
+      "caminho": "tests/firebaseMock.ts",
+      "sha256": "e4b3b737385b4e271d94f9b8859bf590ebc56a5b5c07a669384fa210e02b17f4"
+    },
+    {
+      "caminho": "tests/firestoreMock.ts",
+      "sha256": "fc9cf2b27717095aba22f18bf2688898f0cdd1aa212021f7582e3782f8391181"
+    },
+    {
+      "caminho": "tests/mockPlugin.mjs",
+      "sha256": "38794cd36c33cf670c88bdbc077d05171ab43dd9d8e6fb3890a0f2b791bb2ab8"
+    },
+    {
+      "caminho": "tests/regression.test.tsx",
+      "sha256": "5de2431db07c1571bb7bbe7b652475cd150021fd1768d5a5b146cc30bab8cdd2"
+    },
+    {
+      "caminho": "tests/run.mjs",
+      "sha256": "1d4d98d5307587f4f097bf6e78196dc05a99576f6ee755cf0b73e9fe6eb448f0"
+    }
+  ],
+  "banco_preservado": "ai-studio-gembafta-570b0537-aea6-4a55-ac2a-d81d9f8cc2d0",
+  "validacao": {
+    "testes_simulados": 14,
+    "falhas": 0,
+    "typescript_exit_code": 0,
+    "build_exit_code": 0,
+    "instalacao_limpa": "somente npm ci dry-run; nao instalada do zero",
+    "preview_autenticada": "pendente",
+    "contagem_producao": "nao verificada"
+  },
+  "arquivos_nao_alterados_sha256": {
+    "src/services/firebase.ts": "88342970ab4a7e9ef5a1921fb4c5e10c403a5e711b01606fc8e234393410a165",
+    "firebase-applet-config.json": "d6a0e15a654b574b5469e95e81f1759ebaf80e53d872e0df06c83eab7773165d",
+    "firebase-blueprint.json": "d32cc50970d9546ed885944d037a67efd832ceb491dd54e0d60b10f2924bcf65",
+    "firebase.json": "9c2701bb58d746362b5040b97070f671990bf6897b8dabf7e3cd5bdb6bec913d",
+    "firestore.rules": "05ed7f4d196ab394b30dd2815068a97e854d468bc5fa314b50f702b8d23d42e1",
+    "storage.rules": "9b8f52632117f64bee1ca0bb69298aef04a36e870a3f359ff7c4e3dad47ec51a",
+    "package.json": "2a125e9b0a1e8f188d303a87f5e72195f0a7203f9fbacb079643180b3e141fd9",
+    "netlify.toml": "b4c657ea201c10d82aa6cf3796f620b22dbf3ec09e1cab61f55f07b35fd3a634",
+    "src/utils/scoring.ts": "f65579a0fa9090165d9188abb4abd1850a6ff9575913f0f3660fc740b43cc0f3",
+    "src/utils/inspectionUtils.ts": "25d80efa210eccf19ce9352f884bde912bf736dd730a3aa5044fb5d1d969dbc6",
+    "src/components/DashboardView.tsx": "beb5045599e232b092fe45937f5893df4bd64f85195bee30dc6d714ebb6a3dbd",
+    "src/components/FarolGembaView.tsx": "cc103cb5c968ff7a9e7f4ccd7e00ac75fba784b3a022328831761c782bf139dd",
+    "src/components/LancarInspecaoView.tsx": "18ba8a223e8dfe69c2d4f9ab224fcc62a085c11001fb90be433b38f08f211081",
+    "src/index.css": "21a4cb35c12ab8339c0da98d0b6410040bbd839ca677d0495e0050a7320f9eb6"
+  }
+}

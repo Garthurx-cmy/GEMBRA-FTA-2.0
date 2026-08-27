@@ -1,0 +1,4 @@
+{"version":"anterior_2","stored":400,"received":400,"august":397,"query":{"path":"inspections","constraints":[{"kind":"orderBy","args":["data","desc"]},{"kind":"limit","value":1000}]}}
+{"version":"studio_3","stored":400,"received":15,"august":12,"query":{"path":"inspections","constraints":[{"kind":"where","args":["grupoContrato","in",["vale","vli"]]},{"kind":"limit","value":1000}]}}
+{"version":"correcao_historico","stored":400,"received":400,"august":397,"query":{"path":"inspections"}}
+{"version":"studio_3_automatic_reconciliation","writes":["supervisors/uid-new"],"deletes":["supervisors/sup_old"],"inspectionDeletes":[]}

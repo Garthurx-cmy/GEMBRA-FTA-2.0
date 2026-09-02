@@ -17,6 +17,11 @@ import {
   getGrupoContratoPorLocalidade,
   getContractGroup
 } from "../utils/operational";
+import {
+  getFriendlyInspectionSaveError,
+  sanitizeFirestorePayload,
+  waitForFirestoreConfirmation
+} from "../utils/firestorePayload";
 import { auth, db, hasFirebase } from "./firebase";
 import {
   collection, doc,
@@ -821,18 +826,7 @@ class DBService {
   }
 
   getInspections = () => [...this.inspections];
-  getSupervisors = () => {
-    return this.supervisors.map(sup => {
-      if (this.isJhonata(sup)) {
-        return {
-          ...sup,
-          metaSemanal: 2,
-          metaMensal: 8
-        };
-      }
-      return sup;
-    });
-  };
+  getSupervisors = () => [...this.supervisors];
   getAreas = () => [...this.areas];
   getContracts = () => [...this.contracts];
   getUsers = () => [...this.users];
@@ -861,26 +855,51 @@ class DBService {
   async saveInspection(inspection: Inspection): Promise<void> {
     this.assertFirebase();
     const isNew = !this.inspections.some(i => i.id === inspection.id);
-    const grupoContrato = inspection.grupoContrato || getInspectionGrupoContrato(
+    const grupoContrato = getInspectionGrupoContrato(
       inspection,
       this.areas,
       this.contracts,
       this.supervisors,
       this.deletedNames
     );
-    const payload: any = {
+    if (grupoContrato !== "vale" && grupoContrato !== "vli") {
+      throw new Error("Não foi possível identificar se a inspeção pertence à Vale ou à VLI. Confira a área e o contrato selecionados.");
+    }
+
+    const payload = sanitizeFirestorePayload({
       ...inspection,
       grupoContrato,
       fotosAntes: inspection.fotosAntes || [],
       fotosDepois: inspection.fotosDepois || [],
+      rotacoesFotosAntes: inspection.rotacoesFotosAntes || [],
+      rotacoesFotosDepois: inspection.rotacoesFotosDepois || [],
       createdAt: inspection.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       atualizadoEm: serverTimestamp()
-    };
-    await setDoc(doc(db, "inspections", inspection.id), payload, { merge: true });
-    await this.addAuditLog(isNew ? "create" : "update", "inspection", inspection.id, { supervisorId: inspection.supervisorId, status: inspection.status });
+    });
+
+    try {
+      // Somente a confirmação do documento principal define o sucesso. O ID é
+      // estável no rascunho, portanto uma nova tentativa faz merge no mesmo
+      // documento e não cria inspeção duplicada.
+      await waitForFirestoreConfirmation(
+        setDoc(doc(db, "inspections", inspection.id), payload, { merge: true })
+      );
+    } catch (error) {
+      throw getFriendlyInspectionSaveError(error);
+    }
+
     const supName = this.supervisors.find(s => s.id === inspection.supervisorId)?.nome || this.users.find(u => u.id === inspection.supervisorId)?.nome || (auth?.currentUser?.uid === inspection.supervisorId ? (auth.currentUser.displayName || auth.currentUser.email) : "") || "Usuário";
-    await this.addNotification(supName, isNew ? "lançou uma inspeção" : "atualizou uma inspeção", inspection.atividade || inspection.tipo);
+    // Auditoria e notificação são complementares. Falha de permissão nessas
+    // coleções nunca pode bloquear um lançamento já confirmado em inspections.
+    void Promise.allSettled([
+      this.addAuditLog(isNew ? "create" : "update", "inspection", inspection.id, { supervisorId: inspection.supervisorId, status: inspection.status }),
+      this.addNotification(supName, isNew ? "lançou uma inspeção" : "atualizou uma inspeção", inspection.atividade || inspection.tipo)
+    ]).then((results) => {
+      results.forEach((result) => {
+        if (result.status === "rejected") console.warn("Gravação auxiliar não bloqueante falhou:", result.reason);
+      });
+    });
   }
 
   async deleteInspection(id: string): Promise<void> {
@@ -1513,20 +1532,6 @@ class DBService {
     return { created, updated, errors };
   }
 
-  private isJhonata(sup?: any): boolean {
-    if (!sup) return false;
-    const email = String(sup.email || "").trim().toLowerCase();
-    const nome = String(sup.nome || "").toLowerCase();
-    const id = String(sup.id || "").toLowerCase();
-    return (
-      email === "j.santos@grupofta.com.br" ||
-      email === "jhonata.santos@grupofta.com.br" ||
-      email.startsWith("jhonata") ||
-      id.includes("j_santos") ||
-      id.includes("jhonata") ||
-      (nome.includes("jhonata") && (nome.includes("santos") || nome.includes("gonçalves") || nome.includes("goncalves")))
-    );
-  }
 }
 
 export const dbService = new DBService();

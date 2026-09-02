@@ -404,9 +404,7 @@ export default function App() {
     try {
       await dbService.saveInspection(inspection);
       refreshDatabaseStates();
-      setEditingInspection(null);
       triggerAlert(editingInspection ? "Inspeção atualizada com sucesso!" : "Nova inspeção GEMBA lançada com sucesso!");
-      setActiveTab("historico");
     } catch (error: any) {
       console.error(error);
       triggerAlert(error?.message || "Não foi possível salvar a inspeção.", "error");

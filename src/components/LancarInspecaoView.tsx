@@ -382,6 +382,19 @@ export default function LancarInspecaoView({
     const email = editingInspection ? editingInspection.criadoPorEmail : (currentUser?.email || auth?.currentUser?.email || "");
 
     const selectedSupervisor = supervisors.find(s => supervisorMatchesId(s, supervisorId));
+    const selectedArea = areas.find((area) => area.id === areaId);
+    const canonicalGroup = getGrupoContratoPorLocalidade(selectedArea || areaId, areas, contracts);
+    if (!canonicalGroup) {
+      return setError("Não foi possível identificar se a área selecionada pertence à Vale ou à VLI. Atualize o cadastro da localidade antes de salvar.");
+    }
+    const selectedContract = contracts.find((contract) => contract.id === contratoId);
+    if (
+      selectedContract?.grupoContrato &&
+      selectedContract.grupoContrato !== canonicalGroup
+    ) {
+      return setError("A área e o contrato selecionados pertencem a grupos diferentes. Corrija a seleção antes de salvar.");
+    }
+
     const finalInspection: Inspection = {
       ...editingInspection,
       id: editingInspection?.id || recordId.current,
@@ -391,8 +404,7 @@ export default function LancarInspecaoView({
       supervisorId,
       areaId,
       contratoId,
-      grupoContrato: editingInspection && areaId === editingInspection.areaId && contratoId === editingInspection.contratoId
-        ? editingInspection.grupoContrato : getGrupoContratoPorLocalidade(areaId, areas, contracts),
+      grupoContrato: canonicalGroup,
       tipoLancamento: currentLaunchType,
       tipo: currentLaunchType,
       atividade: currentLaunchType,

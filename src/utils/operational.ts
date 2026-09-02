@@ -1,4 +1,3 @@
-import { supervisorMatchesId } from "./supervisors";
 import { Area, Contract, GrupoContrato, GrupoContratoFiltro, Inspection, Supervisor } from "../types";
 import { getSingleInspectionScore } from "./scoring";
 
@@ -115,7 +114,7 @@ export function getInspectionGrupoContrato(
   inspection: Partial<Inspection>,
   areas: Area[] = [],
   contracts: Contract[] = [],
-  supervisors: Supervisor[] = [],
+  _supervisors: Supervisor[] = [],
   deletedNames: Record<string, string> = {}
 ): GrupoContrato | "nao_classificado" {
   if (!inspection) return "nao_classificado";
@@ -132,9 +131,6 @@ export function getInspectionGrupoContrato(
     if (deletedAreaName) {
       const group = getGrupoContratoPorLocalidade(deletedAreaName, areas, contracts);
       if (group) return group;
-      // Uma localidade histórica identificável que não seja uma das duas Vale
-      // pertence à operação VLI.
-      if (normalizeName(deletedAreaName)) return "vli";
     }
   }
 
@@ -142,50 +138,25 @@ export function getInspectionGrupoContrato(
   if (inspection.contratoId) {
     const contract = contracts.find(c => c.id === inspection.contratoId);
     if (contract) {
+      if (contract.grupoContrato === "vale" || contract.grupoContrato === "vli") return contract.grupoContrato;
       const group = getGrupoContratoPorLocalidade(
         `${contract.codigo || ""} ${contract.nome || ""}`,
         areas,
         contracts
       );
       if (group) return group;
-      if (contract.grupoContrato === "vale" || contract.grupoContrato === "vli") return contract.grupoContrato;
     }
 
     const deletedContractName = deletedNames[inspection.contratoId];
     if (deletedContractName) {
       const group = getGrupoContratoPorLocalidade(deletedContractName, areas, contracts);
       if (group) return group;
-      if (normalizeName(deletedContractName)) return "vli";
     }
   }
 
-  // 3. Vínculo operacional do responsável, somente quando for inequívoco.
-  // Isso ajuda a recuperar inspeções VLI antigas cujo campo grupoContrato foi
-  // preenchido incorretamente como Vale, sem forçar usuários com acesso aos dois.
-  if (inspection.supervisorId) {
-    const supervisor = supervisors.find(s => supervisorMatchesId(s, inspection.supervisorId));
-    if (supervisor) {
-      const explicitGroups = supervisor.gruposContratoPermitidos || [];
-      if (explicitGroups.length === 1) return explicitGroups[0];
-      if (supervisor.grupoContrato === "vli" || supervisor.grupoContrato === "vale") return supervisor.grupoContrato;
-
-      if (explicitGroups.length === 0) {
-        const unidade = normalizeName(supervisor.unidade || "");
-        if (unidade.includes("vale")) return "vale";
-        if (unidade.includes("vli") || unidade.includes("fca")) return "vli";
-
-        const role = normalizeName(`${supervisor.cargo || ""} ${supervisor.perfil || ""}`);
-        if (role.includes("vale")) return "vale";
-        if (role.includes("vli") || role.includes("fca")) return "vli";
-
-        // Base histórica sem classificação contratual: VLI.
-        return "vli";
-      }
-    }
-  }
-
-  // 4. Campo explícito é fallback final, pois versões anteriores podem tê-lo
-  // gravado incorretamente em registros históricos.
+  // 3. O campo explícito canônico é o último fallback seguro. O contrato de
+  // uma inspeção nunca é inferido pelo supervisor: uma pessoa pode atuar nos
+  // dois contratos e esse atalho era a causa da mistura Vale/VLI.
   if (inspection.grupoContrato === "vli" || inspection.grupoContrato === "vale") {
     return inspection.grupoContrato;
   }
@@ -329,5 +300,3 @@ export function getSupervisorMetaMensal(sup: Supervisor): number {
   if (sup.metaMensal !== undefined) return sup.metaMensal;
   return getSupervisorTargets(sup).monthly;
 }
-
-

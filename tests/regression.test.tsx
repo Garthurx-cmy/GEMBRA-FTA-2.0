@@ -1,7 +1,13 @@
 import test, { beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { dbService } from "../src/services/db";
-import { getUniqueMonthlyInspections } from "../src/utils/inspectionUtils";
+import { getInspectionMonthKey, getUniqueMonthlyInspections } from "../src/utils/inspectionUtils";
+import { getInspectionGrupoContrato } from "../src/utils/operational";
+import {
+  FirestoreConfirmationTimeoutError,
+  sanitizeFirestorePayload,
+  waitForFirestoreConfirmation
+} from "../src/utils/firestorePayload";
 import { state, emit } from "./firestoreMock";
 
 const events = new EventTarget();
@@ -102,6 +108,111 @@ test("month filters retain historical records and the diagnostics expose raw mon
   assert.equal(getUniqueMonthlyInspections(list, "2026-08").length, 397);
   assert.deepEqual(dbService.getInspectionSyncInfo().byMonth, { "2026-08": 397, "2026-07": 3 });
   assert.equal(list.length, 400); assert.deepEqual(state.writes, []);
+});
+test("operational date keeps July records in July even when a legacy reference month says August", () => {
+  const julyInspection: any = {
+    id: "july-stale-reference",
+    data: "10/07/2026",
+    mesReferencia: "2026-08",
+    updatedAt: "2026-09-02T10:00:00.000Z"
+  };
+  assert.equal(getInspectionMonthKey(julyInspection), "2026-07");
+  assert.equal(getUniqueMonthlyInspections([julyInspection], "2026-07").length, 1);
+  assert.equal(getUniqueMonthlyInspections([julyInspection], "2026-08").length, 0);
+  assert.equal(getInspectionMonthKey({ id: "invalid", data: "" }), null);
+});
+test("contract group comes from area/contract/explicit record and never from the supervisor", () => {
+  const areas: any[] = [
+    { id: "area-vale", nome: "Andaime Vale", grupoContrato: "vale" },
+    { id: "area-vli", nome: "Ipatinga", grupoContrato: "vli" }
+  ];
+  const supervisors: any[] = [
+    { id: "sup-vli", nome: "Supervisor VLI", gruposContratoPermitidos: ["vli"] },
+    { id: "sup-vale", nome: "Supervisor Vale", gruposContratoPermitidos: ["vale"] }
+  ];
+  assert.equal(getInspectionGrupoContrato({ areaId: "area-vale", grupoContrato: "vli", supervisorId: "sup-vli" }, areas, [], supervisors), "vale");
+  assert.equal(getInspectionGrupoContrato({ areaId: "area-vli", grupoContrato: "vale", supervisorId: "sup-vale" }, areas, [], supervisors), "vli");
+  assert.equal(getInspectionGrupoContrato({ grupoContrato: "vale", supervisorId: "sup-vli" }, [], [], supervisors), "vale");
+  assert.equal(getInspectionGrupoContrato({ supervisorId: "sup-vli" }, [], [], supervisors), "nao_classificado");
+});
+test("Firestore payload sanitizer removes undefined recursively and preserves special values", () => {
+  class SpecialValue { marker = true; }
+  const special = new SpecialValue();
+  const sanitized: any = sanitizeFirestorePayload({
+    keep: "ok",
+    omit: undefined,
+    nested: { omit: undefined, keep: 2 },
+    list: [1, undefined, { omit: undefined, keep: 3 }],
+    special
+  });
+  assert.deepEqual(sanitized.nested, { keep: 2 });
+  assert.deepEqual(sanitized.list, [1, { keep: 3 }]);
+  assert.equal("omit" in sanitized, false);
+  assert.equal(sanitized.special, special);
+});
+test("save timeout returns control with a stable retry message instead of hanging forever", async () => {
+  await assert.rejects(
+    waitForFirestoreConfirmation(new Promise<void>(() => {}), 5),
+    (error: any) => error instanceof FirestoreConfirmationTimeoutError && error.code === "save-confirmation-timeout"
+  );
+});
+test("inspection confirmation succeeds even when auxiliary notification is forbidden", async () => {
+  state.docs.set("areas/area-vale", { id: "area-vale", nome: "Andaime Vale", grupoContrato: "vale", ativo: true });
+  state.docs.set("contracts/contract-vale", { id: "contract-vale", codigo: "02", nome: "Vale", grupoContrato: "vale", ativo: true });
+  state.docs.set("supervisors/sup-vale", { id: "sup-vale", nome: "Supervisor Vale", gruposContratoPermitidos: ["vale"], ativo: true });
+  dbService.startSync(profile); emit();
+  state.failPrefix = "notifications/";
+  const originalWarn = console.warn; console.warn = () => {};
+  try {
+    await dbService.saveInspection({
+      id: "save-with-aux-failure",
+      data: "2026-09-02",
+      supervisorId: "sup-vale",
+      areaId: "area-vale",
+      contratoId: "contract-vale",
+      grupoContrato: "vli",
+      atividade: "DSS",
+      tipo: "DSS",
+      tipoLancamento: "DSS",
+      potencial: "Leve",
+      descricao: "Teste",
+      acaoCorretiva: "Realizado DSS em campo",
+      responsavel: "Supervisor Vale",
+      prazo: "2026-09-02",
+      status: "Concluído",
+      fotosAntes: [],
+      fotosDepois: [],
+      rotacoesFotosAntes: undefined,
+      rotacoesFotosDepois: undefined,
+      observacoes: undefined
+    } as any);
+    await tick();
+  } finally {
+    console.warn = originalWarn;
+  }
+
+  const primaryWrite = state.writes.find((write) => write.path === "inspections/save-with-aux-failure");
+  assert.ok(primaryWrite);
+  assert.equal(primaryWrite.data.grupoContrato, "vale");
+  assert.deepEqual(primaryWrite.data.rotacoesFotosAntes, []);
+  assert.deepEqual(primaryWrite.data.rotacoesFotosDepois, []);
+  assert.equal("observacoes" in primaryWrite.data, false);
+});
+test("primary inspection permission error is explicit and auxiliary writes do not run", async () => {
+  state.docs.set("areas/area-vli", { id: "area-vli", nome: "Ipatinga", grupoContrato: "vli", ativo: true });
+  state.docs.set("contracts/contract-vli", { id: "contract-vli", codigo: "01", nome: "VLI", grupoContrato: "vli", ativo: true });
+  dbService.startSync(profile); emit(); state.failPrefix = "inspections/";
+  await assert.rejects(
+    dbService.saveInspection({
+      id: "forbidden-save", data: "2026-09-02", supervisorId: "sup-vli",
+      areaId: "area-vli", contratoId: "contract-vli", grupoContrato: "vli",
+      atividade: "DSS", tipo: "DSS", potencial: "Leve", descricao: "Teste",
+      acaoCorretiva: "Realizado DSS em campo", responsavel: "Supervisor",
+      prazo: "2026-09-02", status: "Concluído"
+    } as any),
+    /rascunho foi mantido/i
+  );
+  assert.equal(state.writes.some((write) => write.path.startsWith("auditLogs/") || write.path.startsWith("notifications/")), false);
 });
 test("history has no arbitrary 1000-record cap and startup stays idempotent", () => {
   seed(1205); dbService.startSync(profile); const count = state.observers.length;

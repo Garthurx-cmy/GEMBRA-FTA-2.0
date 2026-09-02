@@ -72,18 +72,9 @@ export function getNormalizedInspectionDate(raw: any): string | null {
 export function getInspectionMonthKey(inspectionOrDate: any): string | null {
   if (!inspectionOrDate) return null;
 
-  // Check if object contains reference month field (mesReferencia, MESREFERENCIA, mes_referencia, etc.)
-  if (typeof inspectionOrDate === "object" && inspectionOrDate !== null) {
-    const ref = (inspectionOrDate as any).mesReferencia || (inspectionOrDate as any).MESREFERENCIA || (inspectionOrDate as any).mes_referencia || (inspectionOrDate as any).mes;
-    if (ref) {
-      const norm = getNormalizedInspectionDate(ref);
-      if (norm) return norm.substring(0, 7);
-      if (typeof ref === "string" && /^\d{4}-\d{2}$/.test(ref.trim())) {
-        return ref.trim();
-      }
-    }
-  }
-
+  // A competência mensal vem exclusivamente da data operacional da inspeção.
+  // Campos legados como mesReferencia podem ficar defasados depois de edições e
+  // não podem deslocar uma inspeção de julho para agosto/setembro.
   const dateStr = getNormalizedInspectionDate(inspectionOrDate);
   if (!dateStr) return null;
   return dateStr.substring(0, 7); // YYYY-MM

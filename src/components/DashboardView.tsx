@@ -750,10 +750,7 @@ export default function DashboardView({
         (insp) => getInspectionGrupoContrato(insp, areas, contracts, supervisors, dbService.getDeletedNames()) === group
       );
 
-      const weeklyTarget = Math.max(
-        groupSupervisors.reduce((sum, sup) => sum + getSupervisorTargets(sup).weekly, 0),
-        1
-      );
+      const weeklyTarget = groupSupervisors.reduce((sum, sup) => sum + getSupervisorTargets(sup).weekly, 0);
       const monthlyTarget = groupSupervisors.reduce((sum, sup) => sum + getSupervisorTargets(sup).monthly, 0);
       const monthlyDone = groupMonth.filter(i => groupSupervisors.some(sup => inspectionBelongsToSupervisor(i, sup, supervisors))).length;
       const weeklyDone = groupSupervisors.reduce((sum, sup) => {
@@ -770,14 +767,31 @@ export default function DashboardView({
       return {
         weeklyDone,
         weeklyTarget,
-        weeklyPercentage: Math.min(100, Math.round((weeklyDone / weeklyTarget) * 100)),
+        weeklyPercentage: weeklyTarget > 0 ? Math.min(100, Math.round((weeklyDone / weeklyTarget) * 100)) : 0,
         monthlyDone,
         monthlyTarget,
         monthlyPercentage: monthlyTarget > 0 ? Math.min(100, Math.round((monthlyDone / monthlyTarget) * 100)) : 0
       };
     };
 
-    return { vale: build("vale"), vli: build("vli") };
+    const vale = build("vale");
+    const vli = build("vli");
+    const totalWeeklyTarget = vale.weeklyTarget + vli.weeklyTarget;
+    const totalMonthlyTarget = vale.monthlyTarget + vli.monthlyTarget;
+    const total = {
+      weeklyDone: vale.weeklyDone + vli.weeklyDone,
+      weeklyTarget: totalWeeklyTarget,
+      weeklyPercentage: totalWeeklyTarget > 0
+        ? Math.min(100, Math.round(((vale.weeklyDone + vli.weeklyDone) / totalWeeklyTarget) * 100))
+        : 0,
+      monthlyDone: vale.monthlyDone + vli.monthlyDone,
+      monthlyTarget: totalMonthlyTarget,
+      monthlyPercentage: totalMonthlyTarget > 0
+        ? Math.min(100, Math.round(((vale.monthlyDone + vli.monthlyDone) / totalMonthlyTarget) * 100))
+        : 0
+    };
+
+    return { vale, vli, total };
   }, [weeklyInspections, monthlyInspections, supervisors, areas, contracts]);
 
   // --- NEW MEMOS FOR ADVANCED CARDS ---
@@ -1424,7 +1438,16 @@ export default function DashboardView({
                     </div>
                   );
                 })}
-                <p className="text-[10px] text-slate-400 font-bold uppercase text-center">Metas calculadas separadamente por contrato</p>
+                <div className="rounded-lg border-2 border-[#0B2E59]/15 p-3 bg-blue-50/70">
+                  <div className="flex items-center justify-between text-xs mb-2">
+                    <span className="font-black uppercase text-[#0B2E59]">Total Geral</span>
+                    <span className="font-black text-gray-900">{contractGoalSummaries.total.weeklyDone}/{contractGoalSummaries.total.weeklyTarget} • {contractGoalSummaries.total.weeklyPercentage}%</span>
+                  </div>
+                  <div className="w-full bg-slate-200 h-3 rounded-lg overflow-hidden">
+                    <div className="bg-[#0B2E59] h-full transition-all duration-500" style={{ width: `${contractGoalSummaries.total.weeklyPercentage}%` }} />
+                  </div>
+                </div>
+                <p className="text-[10px] text-slate-400 font-bold uppercase text-center">Vale e VLI separados; total geral somente em Todos</p>
               </div>
             ) : (
             <div className="space-y-4">
@@ -1509,7 +1532,16 @@ export default function DashboardView({
                     </div>
                   );
                 })}
-                <p className="text-[10px] text-slate-400 font-bold uppercase text-center">Totais mensais não são somados entre contratos</p>
+                <div className="rounded-lg border-2 border-[#0B2E59]/15 p-3 bg-blue-50/70">
+                  <div className="flex items-center justify-between text-xs mb-2">
+                    <span className="font-black uppercase text-[#0B2E59]">Total Geral</span>
+                    <span className="font-black text-gray-900">{contractGoalSummaries.total.monthlyDone}/{contractGoalSummaries.total.monthlyTarget} • {contractGoalSummaries.total.monthlyPercentage}%</span>
+                  </div>
+                  <div className="w-full bg-slate-200 h-3 rounded-lg overflow-hidden">
+                    <div className="bg-[#0B2E59] h-full transition-all duration-500" style={{ width: `${contractGoalSummaries.total.monthlyPercentage}%` }} />
+                  </div>
+                </div>
+                <p className="text-[10px] text-slate-400 font-bold uppercase text-center">Metas mensais separadas; total geral somente em Todos</p>
               </div>
             ) : (
             <div className="flex flex-col items-center justify-center py-4">

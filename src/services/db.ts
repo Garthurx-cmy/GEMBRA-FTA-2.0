@@ -507,19 +507,28 @@ class DBService {
       this.readiness.contractsReady = true;
     }));
 
-    // Admin/manager must also receive legacy records without grupoContrato.
-    // Do not filter or cap this authorized history query and do not backfill documents.
+    // Admin, gestores receive the full history without server-side restrictions.
+    // Classification between Vale and VLI is resolved dynamically in memory via getInspectionGrupoContrato.
+    // Non-admin / non-manager roles remain constrained to their permitted contract groups.
     const inspectionsRef = collection(db, "inspections");
-    const inspQuery = isAdmin || isGestor ? inspectionsRef : permittedGroups.length === 1
-      ? query(inspectionsRef, where("grupoContrato", "==", permittedGroups[0]))
-      : query(inspectionsRef, where("grupoContrato", "in", permittedGroups.length ? permittedGroups : ["sem_acesso"]));
+    let inspQuery: any = inspectionsRef;
+
+    if (!isAdmin && !isGestor) {
+      if (permittedGroups.length === 1) {
+        inspQuery = query(inspectionsRef, where("grupoContrato", "==", permittedGroups[0]));
+      } else if (permittedGroups.length > 1) {
+        inspQuery = query(inspectionsRef, where("grupoContrato", "in", permittedGroups));
+      } else {
+        inspQuery = query(inspectionsRef, where("grupoContrato", "in", []));
+      }
+    }
 
     this.unsubscribers.push(onSnapshot(inspQuery, { includeMetadataChanges: true }, snap => {
       const metadata = snap.metadata || { fromCache: false, hasPendingWrites: false };
       // Empty cache is not proof of an empty server collection. Keep the last data.
       if (!(metadata.fromCache && snap.empty)) {
         this.inspections = snap.docs
-          .map(d => ({ id: d.id, ...this.convert(d.data()) } as Inspection))
+          .map(d => ({ ...this.convert(d.data()), id: d.id } as Inspection))
           .sort((a, b) => String(b.data || "").localeCompare(String(a.data || "")) ||
             String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
         this.readiness.inspectionsReady = true;

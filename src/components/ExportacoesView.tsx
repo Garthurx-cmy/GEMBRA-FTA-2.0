@@ -5,7 +5,7 @@
 
 import React, { useState } from "react";
 import { dbService } from "../services/db";
-import { supervisorMatchesId } from "../utils/supervisors";
+import { supervisorMatchesId, getInspectionSupervisorName } from "../utils/supervisors";
 import { getEffectiveMonthKey, getInspectionMonthKey } from "../utils/inspectionUtils";
 import { useOperationalDate } from "../utils/useOperationalDate";
 import { Inspection, Supervisor, Area } from "../types";
@@ -29,8 +29,20 @@ export default function ExportacoesView({
   const effectiveMonthKey = getEffectiveMonthKey(selectedMonth, operationalToday);
   const [successMsg, setSuccessMsg] = useState("");
 
-  const getSupervisorName = (id: string) => supervisors.find((s) => supervisorMatchesId(s, id))?.nome || dbService.getDeletedNames()[id] || "Outros";
-  const getAreaName = (id: string) => areas.find((a) => a.id === id)?.nome || dbService.getDeletedNames()[id] || "Outros";
+  const getSupervisorName = (id: string, item?: Inspection) => {
+    if (item) {
+      const name = getInspectionSupervisorName(item, supervisors, dbService.getDeletedNames());
+      if (name && name !== "Outros") return name;
+    }
+    return supervisors.find((s) => supervisorMatchesId(s, id))?.nome || dbService.getDeletedNames()[id] || "Outros";
+  };
+  const getAreaName = (id: string, item?: Inspection) => {
+    if (item) {
+      const direct = (item as any).areaNome || (item as any).area;
+      if (direct && typeof direct === "string" && direct.trim()) return direct.trim();
+    }
+    return areas.find((a) => a.id === id)?.nome || dbService.getDeletedNames()[id] || "Outros";
+  };
 
   // Export to Excel (CSV format)
   const handleExportCSV = () => {
@@ -53,8 +65,8 @@ export default function ExportacoesView({
     const rows = inspections.map((item) => [
       item.id.toUpperCase(),
       item.data,
-      getSupervisorName(item.supervisorId),
-      getAreaName(item.areaId),
+      getSupervisorName(item.supervisorId, item),
+      getAreaName(item.areaId, item),
       item.atividade,
       item.tipo,
       item.potencial,

@@ -1,5 +1,10 @@
 import { useOperationalDate } from "../utils/useOperationalDate";
-import { inspectionBelongsToSupervisor, resolveInspectionSupervisor, supervisorMatchesId } from "../utils/supervisors";
+import {
+  inspectionBelongsToSupervisor,
+  resolveInspectionSupervisor,
+  supervisorMatchesId,
+  getInspectionSupervisorName
+} from "../utils/supervisors";
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
@@ -19,7 +24,8 @@ import {
   isDesvioComportamentalInspection,
   TIPO_LANCAMENTO_CONFIG,
   GrupoContrato,
-  GrupoContratoFiltro
+  GrupoContratoFiltro,
+  UserProfile
 } from "../types";
 import {
   getNormalizedInspectionDate,
@@ -49,7 +55,11 @@ import {
   XCircle,
   ShieldAlert,
   Calendar,
-  Building2
+  Building2,
+  ChevronDown,
+  ChevronUp,
+  Database,
+  ShieldCheck
 } from "lucide-react";
 import FarolGembaView from "./FarolGembaView";
 import ResolvedImage from "./ResolvedImage";
@@ -90,6 +100,7 @@ interface DashboardViewProps {
   grupoContrato?: GrupoContratoFiltro;
   onSelectGrupoContrato?: (grupo: GrupoContratoFiltro) => void;
   permittedGruposContrato?: GrupoContrato[];
+  currentUser?: UserProfile | null;
 }
 
 export default function DashboardView({
@@ -103,8 +114,10 @@ export default function DashboardView({
   onSelectTab,
   grupoContrato = "todos",
   onSelectGrupoContrato,
-  permittedGruposContrato = ["vale", "vli"]
+  permittedGruposContrato = ["vale", "vli"],
+  currentUser
 }: DashboardViewProps) {
+  const [isAuditCardOpen, setIsAuditCardOpen] = useState(false);
   const [localMonth, setLocalMonth] = useState("auto");
   const activeMonth = propSelectedMonth !== undefined ? propSelectedMonth : localMonth;
   const operationalToday = useOperationalDate();
@@ -915,14 +928,17 @@ export default function DashboardView({
     const scores: Record<string, number> = {};
     supervisors.forEach(s => { scores[s.id] = 0; });
     monthlyInspections.forEach((i) => {
-      if (scores[i.supervisorId] !== undefined) {
-        if (i.potencial === Potential.LEVE) scores[i.supervisorId] += 1;
-        else if (i.potencial === Potential.MEDIO) scores[i.supervisorId] += 2;
-        else if (i.potencial === Potential.GRAVE) scores[i.supervisorId] += 3;
-        else if (i.potencial === Potential.CRITICO) scores[i.supervisorId] += 5;
+      const sup = resolveInspectionSupervisor(i, supervisors, dbService.getDeletedNames());
+      const supId = sup?.id || i.supervisorId;
+      if (supId) {
+        scores[supId] = (scores[supId] || 0);
+        if (i.potencial === Potential.LEVE) scores[supId] += 1;
+        else if (i.potencial === Potential.MEDIO) scores[supId] += 2;
+        else if (i.potencial === Potential.GRAVE) scores[supId] += 3;
+        else if (i.potencial === Potential.CRITICO) scores[supId] += 5;
 
         if (i.status === InspectionStatus.CONCLUIDO) {
-          scores[i.supervisorId] += 2;
+          scores[supId] += 2;
         }
       }
     });
@@ -936,7 +952,8 @@ export default function DashboardView({
       }
     });
 
-    const topSupervisorName = supervisors.find(s => s.id === topSupervisorId)?.nome || "Nenhum";
+    const topSupervisorName = supervisors.find(s => s.id === topSupervisorId)?.nome ||
+      (topSupervisorId && !topSupervisorId.startsWith("sup-hist-") ? topSupervisorId : "Nenhum");
 
     return {
       weekCount,
@@ -972,33 +989,54 @@ export default function DashboardView({
   // --- CHART 1: Inspeções por Supervisor ---
   const chartSupervisors = useMemo(() => {
     const counts: Record<string, number> = {};
+    
+    // Seed existing supervisors with 0
     supervisors.forEach((s) => {
-      counts[s.nome] = 0;
+      if (s.nome) counts[s.nome] = 0;
     });
+
     filteredInspections.forEach((i) => {
-      const supName = supervisors.find((s) => supervisorMatchesId(s, i.supervisorId))?.nome || dbService.getDeletedNames()[i.supervisorId] || "Outros";
+      const supName = getInspectionSupervisorName(i, supervisors, dbService.getDeletedNames());
       counts[supName] = (counts[supName] || 0) + 1;
     });
 
+    // Return entries with at least 1 inspection, plus top seeded supervisors
     return Object.entries(counts)
+      .filter(([name, count]) => count > 0 || (supervisors.some(s => s.nome === name) && filteredInspections.length === 0))
       .map(([name, count]) => ({ name, count }))
-      .sort((a, b) => b.count - a.count);
+      .sort((a, b) => {
+        // Keep "Outros" at the bottom if any other named supervisors exist
+        if (a.name === "Outros") return 1;
+        if (b.name === "Outros") return -1;
+        return b.count - a.count;
+      });
   }, [filteredInspections, supervisors]);
 
   // --- CHART 2: Inspeções por Área ---
   const chartAreas = useMemo(() => {
     const counts: Record<string, number> = {};
     areas.forEach((a) => {
-      counts[a.nome] = 0;
+      if (a.nome) counts[a.nome] = 0;
     });
+
     filteredInspections.forEach((i) => {
-      const areaName = areas.find((a) => a.id === i.areaId)?.nome || dbService.getDeletedNames()[i.areaId] || "Outros";
+      const area = areas.find((a) => a.id === i.areaId);
+      const areaName = area?.nome ||
+        (i as any).areaNome ||
+        (i as any).area ||
+        dbService.getDeletedNames()[i.areaId] ||
+        "Outros";
       counts[areaName] = (counts[areaName] || 0) + 1;
     });
 
     return Object.entries(counts)
+      .filter(([name, count]) => count > 0 || (areas.some(a => a.nome === name) && filteredInspections.length === 0))
       .map(([name, count]) => ({ name, count }))
-      .sort((a, b) => b.count - a.count);
+      .sort((a, b) => {
+        if (a.name === "Outros") return 1;
+        if (b.name === "Outros") return -1;
+        return b.count - a.count;
+      });
   }, [filteredInspections, areas]);
 
   // --- CHART 3: Inspeções por Tipo ---
@@ -1095,6 +1133,93 @@ export default function DashboardView({
     });
   }, [inspections]);
 
+  const isAdminOrGestor = useMemo(() => {
+    const role = currentUser?.perfil;
+    return role === "Desenvolvedor/Admin" || role === "Administrador" || role === "Gestor" || role === "admin" || role === "gestor";
+  }, [currentUser?.perfil]);
+
+  const auditData = useMemo(() => {
+    const delNames = dbService.getDeletedNames();
+    const totalFirestore = inspections.length;
+    let totalVli = 0;
+    let totalVale = 0;
+    let totalNaoClassificado = 0;
+    let semGrupo = 0;
+    let julho2026 = 0;
+    let agosto2026 = 0;
+    let setembro2026 = 0;
+    let vinculosPendentes = 0;
+    const byMonth: Record<string, number> = {};
+    const byLocalidade: Record<string, number> = {};
+    const byContrato: Record<string, number> = {};
+    const bySupervisor: Record<string, number> = {};
+
+    inspections.forEach((i) => {
+      const g = getInspectionGrupoContrato(i, areas, contracts, supervisors, delNames);
+      if (g === "vale") totalVale++;
+      else if (g === "vli") totalVli++;
+      else totalNaoClassificado++;
+
+      if (!i.grupoContrato) semGrupo++;
+
+      const m = getInspectionMonthKey(i) || "sem_data";
+      byMonth[m] = (byMonth[m] || 0) + 1;
+      if (m === "2026-07") julho2026++;
+      if (m === "2026-08") agosto2026++;
+      if (m === "2026-09") setembro2026++;
+
+      const sup = resolveInspectionSupervisor(i, supervisors, delNames);
+      if (!sup) vinculosPendentes++;
+
+      const loc = areas.find(a => a.id === i.areaId)?.nome || delNames[i.areaId || ""] || (i as any).localidade || "Desconhecida";
+      byLocalidade[loc] = (byLocalidade[loc] || 0) + 1;
+
+      const cont = contracts.find(c => c.id === i.contratoId)?.nome || delNames[i.contratoId || ""] || (i as any).contratoNome || "Desconhecido";
+      byContrato[cont] = (byContrato[cont] || 0) + 1;
+
+      const supId = i.supervisorId || "sem_id";
+      bySupervisor[supId] = (bySupervisor[supId] || 0) + 1;
+    });
+
+    return {
+      totalFirestore,
+      totalVli,
+      totalVale,
+      totalNaoClassificado,
+      semGrupo,
+      julho2026,
+      agosto2026,
+      setembro2026,
+      vinculosPendentes,
+      byMonth,
+      byLocalidade,
+      byContrato,
+      bySupervisor,
+      syncInfo: dbService.getInspectionSyncInfo()
+    };
+  }, [inspections, areas, contracts, supervisors]);
+
+  useEffect(() => {
+    if (!isAdminOrGestor || inspections.length === 0) return;
+    console.info("[Auditoria Histórico Gemba]", {
+      totalFirestore: auditData.totalFirestore,
+      totalMostradoDashboard: filteredInspections.length,
+      diferenca: auditData.totalFirestore - filteredInspections.length,
+      vli: auditData.totalVli,
+      vale: auditData.totalVale,
+      naoClassificado: auditData.totalNaoClassificado,
+      semGrupoContrato: auditData.semGrupo,
+      vinculosPendentes: auditData.vinculosPendentes,
+      julho2026: auditData.julho2026,
+      agosto2026: auditData.agosto2026,
+      setembro2026: auditData.setembro2026,
+      porMes: auditData.byMonth,
+      porLocalidade: auditData.byLocalidade,
+      porContrato: auditData.byContrato,
+      porSupervisorId: auditData.bySupervisor
+    });
+  }, [isAdminOrGestor, auditData, filteredInspections.length]);
+
   return (
     <div className="space-y-8 animate-fade-in">
       {/* Page Header */}
@@ -1150,6 +1275,84 @@ export default function DashboardView({
           </div>
         </div>
       </div>
+
+      {/* Visual Integrity Audit Card for Admins & Managers */}
+      {isAdminOrGestor && (
+        <div className="bg-slate-900 text-slate-100 rounded-xl border border-slate-800 shadow-sm overflow-hidden">
+          <button
+            type="button"
+            onClick={() => setIsAuditCardOpen(!isAuditCardOpen)}
+            className="w-full px-5 py-3.5 flex items-center justify-between text-left hover:bg-slate-800/60 transition-colors cursor-pointer"
+          >
+            <div className="flex items-center gap-2.5">
+              <ShieldCheck className="text-emerald-400" size={18} />
+              <div>
+                <span className="font-extrabold text-xs tracking-wider uppercase text-white">
+                  Auditoria de Integridade do Histórico
+                </span>
+                <span className="ml-2 text-[10px] text-slate-400 font-medium hidden sm:inline">
+                  (Modo somente leitura • {auditData.totalFirestore} documentos no banco)
+                </span>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] font-bold text-emerald-400 bg-emerald-950/60 border border-emerald-800/60 px-2 py-0.5 rounded-full uppercase tracking-wider">
+                Listener Ativo
+              </span>
+              {isAuditCardOpen ? <ChevronUp size={16} className="text-slate-400" /> : <ChevronDown size={16} className="text-slate-400" />}
+            </div>
+          </button>
+
+          {isAuditCardOpen && (
+            <div className="px-5 pb-5 pt-2 border-t border-slate-800 bg-slate-950/50 space-y-4">
+              <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
+                <div className="bg-slate-900/90 border border-slate-800 p-3 rounded-lg flex flex-col">
+                  <span className="text-[9px] uppercase tracking-wider font-extrabold text-slate-400">Total Firestore</span>
+                  <span className="text-lg font-black text-white mt-1 font-mono">{auditData.totalFirestore}</span>
+                </div>
+                <div className="bg-slate-900/90 border border-slate-800 p-3 rounded-lg flex flex-col">
+                  <span className="text-[9px] uppercase tracking-wider font-extrabold text-[#F58220]">Total VLI</span>
+                  <span className="text-lg font-black text-[#F58220] mt-1 font-mono">{auditData.totalVli}</span>
+                </div>
+                <div className="bg-slate-900/90 border border-slate-800 p-3 rounded-lg flex flex-col">
+                  <span className="text-[9px] uppercase tracking-wider font-extrabold text-emerald-400">Total Vale</span>
+                  <span className="text-lg font-black text-emerald-400 mt-1 font-mono">{auditData.totalVale}</span>
+                </div>
+                <div className="bg-slate-900/90 border border-slate-800 p-3 rounded-lg flex flex-col">
+                  <span className="text-[9px] uppercase tracking-wider font-extrabold text-amber-400">Não Classificados</span>
+                  <span className="text-lg font-black text-amber-400 mt-1 font-mono">{auditData.totalNaoClassificado}</span>
+                </div>
+                <div className="bg-slate-900/90 border border-slate-800 p-3 rounded-lg flex flex-col">
+                  <span className="text-[9px] uppercase tracking-wider font-extrabold text-rose-400">Vínculos Pendentes</span>
+                  <span className="text-lg font-black text-rose-400 mt-1 font-mono">{auditData.vinculosPendentes}</span>
+                </div>
+                <div className="bg-slate-900/90 border border-slate-800 p-3 rounded-lg flex flex-col">
+                  <span className="text-[9px] uppercase tracking-wider font-extrabold text-blue-400">Julho/2026</span>
+                  <span className="text-lg font-black text-blue-400 mt-1 font-mono">{auditData.julho2026}</span>
+                </div>
+                <div className="bg-slate-900/90 border border-slate-800 p-3 rounded-lg flex flex-col">
+                  <span className="text-[9px] uppercase tracking-wider font-extrabold text-indigo-400">Agosto/2026</span>
+                  <span className="text-lg font-black text-indigo-400 mt-1 font-mono">{auditData.agosto2026}</span>
+                </div>
+                <div className="bg-slate-900/90 border border-slate-800 p-3 rounded-lg flex flex-col">
+                  <span className="text-[9px] uppercase tracking-wider font-extrabold text-teal-400">Setembro/2026</span>
+                  <span className="text-lg font-black text-teal-400 mt-1 font-mono">{auditData.setembro2026}</span>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-400 pt-2 border-t border-slate-800/80">
+                <div className="flex items-center gap-4">
+                  <span>Status da sincronização: <strong className="text-white capitalize">{auditData.syncInfo.status}</strong></span>
+                  <span>Sem grupo persistido: <strong className="text-white">{auditData.semGrupo}</strong></span>
+                </div>
+                <span className="text-[10px] text-slate-500 font-mono">
+                  Diferença para visualização filtrada atual: {auditData.totalFirestore - filteredInspections.length} registros
+                </span>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* FILTER PANEL */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-5">

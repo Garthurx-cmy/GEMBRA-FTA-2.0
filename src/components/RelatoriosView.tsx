@@ -5,7 +5,7 @@
 
 import React, { useState, useEffect, useMemo } from "react";
 import { dbService } from "../services/db";
-import { inspectionBelongsToSupervisor, supervisorMatchesId } from "../utils/supervisors";
+import { inspectionBelongsToSupervisor, supervisorMatchesId, getInspectionSupervisorName } from "../utils/supervisors";
 import { getNormalizedInspectionDate, getInspectionMonthKey } from "../utils/inspectionUtils";
 import { Inspection, Supervisor, Area, Contract, SystemConfig, getTipoLancamento } from "../types";
 import { Printer, FileText, Calendar, User, ShieldAlert, CheckCircle, Eye, RefreshCw, Download, Filter, XCircle } from "lucide-react";
@@ -214,8 +214,20 @@ export default function RelatoriosView({
   const isPresenca = selectedInspection && getTipoLancamento(selectedInspection.atividade, selectedInspection.tipo, selectedInspection.tipoLancamento) === "Presença em Campo";
 
   // Helper resolvers
-  const getSupervisorName = (id: string) => supervisors.find((s) => supervisorMatchesId(s, id))?.nome || dbService.getDeletedNames()[id] || "Outros";
-  const getAreaName = (id: string) => areas.find((a) => a.id === id)?.nome || dbService.getDeletedNames()[id] || "Outros";
+  const getSupervisorName = (id: string, item?: Inspection | null) => {
+    if (item) {
+      const name = getInspectionSupervisorName(item, supervisors, dbService.getDeletedNames());
+      if (name && name !== "Outros") return name;
+    }
+    return supervisors.find((s) => supervisorMatchesId(s, id))?.nome || dbService.getDeletedNames()[id] || "Outros";
+  };
+  const getAreaName = (id: string, item?: Inspection | null) => {
+    if (item) {
+      const direct = (item as any).areaNome || (item as any).area;
+      if (direct && typeof direct === "string" && direct.trim()) return direct.trim();
+    }
+    return areas.find((a) => a.id === id)?.nome || dbService.getDeletedNames()[id] || "Outros";
+  };
   const getContractCode = (id: string) => contracts.find((c) => c.id === id)?.codigo || dbService.getDeletedNames()[id] || "Geral";
 
   // Dynamic computation of report generation timestamp
@@ -956,7 +968,7 @@ export default function RelatoriosView({
                     </span>
                   </div>
                   <span className="text-gray-800 font-semibold truncate w-full">
-                    Supervisor: {getSupervisorName(item.supervisorId)}
+                    Supervisor: {getSupervisorName(item.supervisorId, item)}
                   </span>
                   <span className="text-[10px] text-gray-500 truncate w-full">
                     {item.descricao}
@@ -1073,11 +1085,11 @@ export default function RelatoriosView({
                         <div className="grid grid-cols-2 md:grid-cols-4 gap-y-4 gap-x-2 border-b border-gray-100 pb-5 mb-5 metadata-grid">
                           <div className="p-1">
                             <span className="block text-[9px] uppercase font-bold text-gray-400 tracking-wider">Supervisor</span>
-                            <span className="font-extrabold text-gray-900">{getSupervisorName(selectedInspection.supervisorId)}</span>
+                            <span className="font-extrabold text-gray-900">{getSupervisorName(selectedInspection.supervisorId, selectedInspection)}</span>
                           </div>
                           <div className="p-1">
                             <span className="block text-[9px] uppercase font-bold text-gray-400 tracking-wider">Área Operacional</span>
-                            <span className="font-extrabold text-gray-900">{getAreaName(selectedInspection.areaId)}</span>
+                            <span className="font-extrabold text-gray-900">{getAreaName(selectedInspection.areaId, selectedInspection)}</span>
                           </div>
                           <div className="p-1">
                             <span className="block text-[9px] uppercase font-bold text-gray-400 tracking-wider">Contrato Associado</span>

@@ -126,10 +126,10 @@ export default function App() {
     setGrupoContratoSelecionadoState(novoGrupo);
   };
 
-  // Unified operational supervisors (collection supervisors + operational users + currentUser)
+  // Unified operational supervisors (collection supervisors + operational users + currentUser + history)
   const unifiedSupervisors = useMemo(() => {
-    return buildUnifiedSupervisors(supervisors, users, currentUser);
-  }, [supervisors, users, currentUser]);
+    return buildUnifiedSupervisors(supervisors, users, currentUser, inspections);
+  }, [supervisors, users, currentUser, inspections]);
 
   const globalSearchResults = useMemo(() => {
     const term = globalSearchTerm.trim().toLowerCase();
@@ -239,142 +239,192 @@ export default function App() {
     }
 
     let profileUnsubscribe: (() => void) | null = null;
+    let authTimeoutId: ReturnType<typeof setTimeout> | null = null;
 
-    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
-      if (profileUnsubscribe) {
-        profileUnsubscribe();
-        profileUnsubscribe = null;
+    const clearAuthTimeout = () => {
+      if (authTimeoutId !== null) {
+        clearTimeout(authTimeoutId);
+        authTimeoutId = null;
       }
+    };
 
-      if (!firebaseUser) {
-        dbService.stopSync(true);
-        setCurrentUser(null);
-        setAuthLoading(false);
-        return;
-      }
-
-      // 1. Check offline local cache for fast startup
-      const cacheKey = `gemba_profile_${firebaseUser.uid}`;
-      try {
-        const cachedRaw = localStorage.getItem(cacheKey);
-        if (cachedRaw) {
-          const parsed = JSON.parse(cachedRaw);
-          if (parsed && parsed.id === firebaseUser.uid && parsed.ativo) {
-            setCurrentUser(parsed);
-            setAuthLoading(false);
-          }
+    const unsubscribe = onAuthStateChanged(
+      auth,
+      async (firebaseUser) => {
+        clearAuthTimeout();
+        if (profileUnsubscribe) {
+          profileUnsubscribe();
+          profileUnsubscribe = null;
         }
-      } catch (e) {
-        console.warn("Erro ao ler perfil do cache local:", e);
-      }
 
-      setAuthLoading(true);
+        if (!firebaseUser) {
+          dbService.stopSync(true);
+          setCurrentUser(null);
+          setAuthLoading(false);
+          return;
+        }
 
-      // 2. Subscribe to user profile document via onSnapshot for real-time and offline tolerance
-      const userDocRef = doc(db, "users", firebaseUser.uid);
-      profileUnsubscribe = onSnapshot(
-        userDocRef,
-        async (profileSnap) => {
-          try {
-            if (!profileSnap.exists()) {
-              // Only sign out if we know for certain document does not exist
-              console.warn("Perfil não encontrado no Firestore para UID:", firebaseUser.uid);
-              localStorage.removeItem(cacheKey);
-              await signOut(auth);
-              setLoginError("Conta autenticada, mas o perfil de acesso não foi encontrado. Procure o administrador.");
+        // 1. Check offline local cache for fast startup
+        const cacheKey = `gemba_profile_${firebaseUser.uid}`;
+        let hasValidCache = false;
+        try {
+          const cachedRaw = localStorage.getItem(cacheKey);
+          if (cachedRaw) {
+            const parsed = JSON.parse(cachedRaw);
+            if (parsed && parsed.id === firebaseUser.uid && parsed.ativo !== false) {
+              setCurrentUser(parsed);
               setAuthLoading(false);
-              return;
+              hasValidCache = true;
             }
-
-            const rawProfileData: any = profileSnap.data();
-            if (hasLegacyUppercaseFields(rawProfileData)) {
-              console.warn("Aviso: Perfil do usuário contém campos legados em maiúsculas.", rawProfileData);
-            }
-            const profile: UserProfile = normalizeUserProfile(rawProfileData, profileSnap.id);
-
-            if (!profile.ativo) {
-              localStorage.removeItem(cacheKey);
-              await signOut(auth);
-              setLoginError("Seu acesso está inativo. Procure o administrador.");
-              setAuthLoading(false);
-              return;
-            }
-
-            // Save valid active profile in local storage
-            try {
-              localStorage.setItem(cacheKey, JSON.stringify(profile));
-            } catch (_) {}
-
-            setCurrentUser(profile);
-            setLoginError(null);
-            setAuthLoading(false);
-
-            // Update ultimoLogin if more than 24h passed
-            let shouldUpdateLogin = true;
-            if (profile.ultimoLogin) {
-              try {
-                let lastLoginDate: Date | null = null;
-                if (profile.ultimoLogin && typeof profile.ultimoLogin.toDate === "function") {
-                  lastLoginDate = profile.ultimoLogin.toDate();
-                } else if (profile.ultimoLogin && typeof profile.ultimoLogin === "object" && (profile.ultimoLogin as any).seconds) {
-                  lastLoginDate = new Date((profile.ultimoLogin as any).seconds * 1000);
-                } else if (profile.ultimoLogin) {
-                  lastLoginDate = new Date(profile.ultimoLogin);
-                }
-                if (lastLoginDate && !isNaN(lastLoginDate.getTime())) {
-                  const diffMs = Date.now() - lastLoginDate.getTime();
-                  if (diffMs < 24 * 60 * 60 * 1000) {
-                    shouldUpdateLogin = false;
-                  }
-                }
-              } catch (e) {
-                console.warn("Erro ao ler ultimoLogin do perfil:", e);
-              }
-            }
-
-            if (shouldUpdateLogin) {
-              updateDoc(userDocRef, { ultimoLogin: serverTimestamp() }).catch(() => undefined);
-            }
-            setTimeout(refreshDatabaseStates, 100);
-          } catch (err: any) {
-            console.error("Erro ao processar dados de perfil:", err);
-            setAuthLoading(false);
           }
-        },
-        async (error: any) => {
-          console.warn("Aviso na escuta do documento de perfil:", error);
-          const isPermissionError =
-            error?.code === "permission-denied" ||
-            error?.message?.toLowerCase().includes("permission") ||
-            error?.message?.toLowerCase().includes("insufficient");
+        } catch (e) {
+          console.warn("Erro ao ler perfil do cache local:", e);
+        }
 
-          if (isPermissionError) {
-            localStorage.removeItem(cacheKey);
-            await signOut(auth);
-            setLoginError("Foi encontrada uma inconsistência no perfil de acesso. Procure o administrador.");
-            setAuthLoading(false);
-            return;
-          }
+        // 2. Only show loading if we do not have a valid cached profile
+        if (!hasValidCache) {
+          setAuthLoading(true);
+        }
 
-          // In case of network / offline issues, use cached profile if available
+        // 3. Safety timeout of 8 seconds to prevent infinite "Verificando sessão..."
+        authTimeoutId = setTimeout(() => {
+          authTimeoutId = null;
+          let fallbackProfile: UserProfile | null = null;
           try {
             const cachedRaw = localStorage.getItem(cacheKey);
             if (cachedRaw) {
               const parsed = JSON.parse(cachedRaw);
-              if (parsed && parsed.ativo) {
-                setCurrentUser(parsed);
-                setAuthLoading(false);
-                return;
+              if (parsed && parsed.id === firebaseUser.uid && parsed.ativo !== false) {
+                fallbackProfile = parsed;
               }
             }
           } catch (_) {}
 
-          setAuthLoading(false);
-        }
-      );
-    });
+          if (fallbackProfile) {
+            setCurrentUser(fallbackProfile);
+            setAuthLoading(false);
+          } else {
+            setAuthLoading(false);
+            setLoginError("Não foi possível verificar sua sessão. Confira a conexão e tente entrar novamente.");
+          }
+        }, 8000);
+
+        // 4. Subscribe to user profile document via onSnapshot for real-time and offline tolerance
+        const userDocRef = doc(db, "users", firebaseUser.uid);
+        profileUnsubscribe = onSnapshot(
+          userDocRef,
+          async (profileSnap) => {
+            clearAuthTimeout();
+            try {
+              if (!profileSnap.exists()) {
+                console.warn("Perfil não encontrado no Firestore para UID:", firebaseUser.uid);
+                localStorage.removeItem(cacheKey);
+                await signOut(auth);
+                setLoginError("Conta autenticada, mas o perfil de acesso não foi encontrado. Procure o administrador.");
+                setAuthLoading(false);
+                return;
+              }
+
+              const rawProfileData: any = profileSnap.data();
+              if (hasLegacyUppercaseFields(rawProfileData)) {
+                console.warn("Aviso: Perfil do usuário contém campos legados em maiúsculas.", rawProfileData);
+              }
+              const profile: UserProfile = normalizeUserProfile(rawProfileData, profileSnap.id);
+
+              if (profile.ativo === false) {
+                localStorage.removeItem(cacheKey);
+                await signOut(auth);
+                setLoginError("Seu acesso está inativo. Procure o administrador.");
+                setAuthLoading(false);
+                return;
+              }
+
+              // Save valid active profile in local storage
+              try {
+                localStorage.setItem(cacheKey, JSON.stringify(profile));
+              } catch (_) {}
+
+              setCurrentUser(profile);
+              setLoginError(null);
+              setAuthLoading(false);
+
+              // Update ultimoLogin if more than 24h passed
+              let shouldUpdateLogin = true;
+              if (profile.ultimoLogin) {
+                try {
+                  let lastLoginDate: Date | null = null;
+                  if (profile.ultimoLogin && typeof profile.ultimoLogin.toDate === "function") {
+                    lastLoginDate = profile.ultimoLogin.toDate();
+                  } else if (profile.ultimoLogin && typeof profile.ultimoLogin === "object" && (profile.ultimoLogin as any).seconds) {
+                    lastLoginDate = new Date((profile.ultimoLogin as any).seconds * 1000);
+                  } else if (profile.ultimoLogin) {
+                    lastLoginDate = new Date(profile.ultimoLogin);
+                  }
+                  if (lastLoginDate && !isNaN(lastLoginDate.getTime())) {
+                    const diffMs = Date.now() - lastLoginDate.getTime();
+                    if (diffMs < 24 * 60 * 60 * 1000) {
+                      shouldUpdateLogin = false;
+                    }
+                  }
+                } catch (e) {
+                  console.warn("Erro ao ler ultimoLogin do perfil:", e);
+                }
+              }
+
+              if (shouldUpdateLogin) {
+                updateDoc(userDocRef, { ultimoLogin: serverTimestamp() }).catch(() => undefined);
+              }
+              setTimeout(refreshDatabaseStates, 100);
+            } catch (err: any) {
+              console.error("Erro ao processar dados de perfil:", err);
+              setAuthLoading(false);
+            }
+          },
+          async (error: any) => {
+            clearAuthTimeout();
+            console.warn("Aviso na escuta do documento de perfil:", error);
+            const isPermissionError =
+              error?.code === "permission-denied" ||
+              error?.message?.toLowerCase().includes("permission") ||
+              error?.message?.toLowerCase().includes("insufficient");
+
+            if (isPermissionError) {
+              localStorage.removeItem(cacheKey);
+              await signOut(auth);
+              setLoginError("Foi encontrada uma inconsistência no perfil de acesso. Procure o administrador.");
+              setAuthLoading(false);
+              return;
+            }
+
+            // In case of network / offline issues, use cached profile if available
+            try {
+              const cachedRaw = localStorage.getItem(cacheKey);
+              if (cachedRaw) {
+                const parsed = JSON.parse(cachedRaw);
+                if (parsed && parsed.id === firebaseUser.uid && parsed.ativo !== false) {
+                  setCurrentUser(parsed);
+                  setAuthLoading(false);
+                  return;
+                }
+              }
+            } catch (_) {}
+
+            setAuthLoading(false);
+            setLoginError("Não foi possível verificar sua sessão. Confira a conexão e tente entrar novamente.");
+          }
+        );
+      },
+      (error: any) => {
+        clearAuthTimeout();
+        console.error("Erro ao verificar autenticação:", error);
+        setCurrentUser(null);
+        setAuthLoading(false);
+        setLoginError("Falha ao verificar a autenticação. Confira a conexão e tente novamente.");
+      }
+    );
 
     return () => {
+      clearAuthTimeout();
       if (profileUnsubscribe) {
         profileUnsubscribe();
       }
@@ -1119,17 +1169,7 @@ export default function App() {
         {/* SCREEN WORKSPACE INNER CONTAINER */}
         <main className="flex-1 overflow-y-auto px-4 pt-4 pb-20 md:pt-5 md:pb-20 print:p-0">
           <div className="max-w-7xl mx-auto h-full">
-            {(currentUser?.perfil === "Desenvolvedor/Admin" || currentUser?.perfil === "Administrador" || currentUser?.perfil === "Gestor") && (
-              <section className="mb-4 rounded-xl border border-blue-200 bg-blue-50 p-4 text-xs text-blue-950" aria-label="Diagnóstico do histórico">
-                <strong>Histórico recebido: {inspectionSyncInfo.receivedCount} inspeções</strong>
-                <span> · {inspectionSyncInfo.withoutContractGroup} sem grupoContrato · origem: {inspectionSyncInfo.status === "ready" ? "servidor confirmado" : inspectionSyncInfo.status === "error" ? "erro de leitura" : "aguardando confirmação do servidor"}</span>
-                <p className="mt-1">{Object.entries(inspectionSyncInfo.byMonth).sort(([a], [b]) => b.localeCompare(a)).map(([month, count]) => `${month}: ${count}`).join(" · ") || "Aguardando leitura. Não representa histórico apagado."}</p>
-                {inspectionSyncInfo.directoryReady && inspectionSyncInfo.unresolvedSupervisorCount > 0 && (
-                  <p className="mt-1 text-amber-800">{inspectionSyncInfo.unresolvedSupervisorCount} inspeções apontam para IDs não encontrados no diretório atual. Os IDs foram preservados; o Farol exige conferência desses vínculos.</p>
-                )}
-                <p className="mt-1">Contagem da base autorizada, antes dos filtros e metas. Nenhuma inspeção é regravada por esta conferência.</p>
-              </section>
-            )}
+
             {inspectionSyncInfo.status === "error" && (
               <div role="alert" className="mb-4 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">
                 Não foi possível confirmar o histórico no servidor ({inspectionSyncInfo.errorCode}). Os dados já recebidos foram mantidos.
@@ -1154,6 +1194,7 @@ export default function App() {
                 grupoContrato={grupoContratoSelecionado}
                 onSelectGrupoContrato={setGrupoContratoSelecionado}
                 permittedGruposContrato={permittedGruposContrato}
+                currentUser={currentUser}
               />
             )}
 

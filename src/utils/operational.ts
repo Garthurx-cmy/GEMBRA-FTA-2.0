@@ -119,7 +119,7 @@ export function getInspectionGrupoContrato(
 ): GrupoContrato | "nao_classificado" {
   if (!inspection) return "nao_classificado";
 
-  // 1. Área/localidade conhecida é autoritativa.
+  // 1. areaId encontrado no diretório de áreas
   if (inspection.areaId) {
     const area = areas.find(a => a.id === inspection.areaId);
     if (area) {
@@ -127,6 +127,7 @@ export function getInspectionGrupoContrato(
       if (group) return group;
     }
 
+    // 2. nome da área histórica em deleted_names
     const deletedAreaName = deletedNames[inspection.areaId];
     if (deletedAreaName) {
       const group = getGrupoContratoPorLocalidade(deletedAreaName, areas, contracts);
@@ -134,7 +135,14 @@ export function getInspectionGrupoContrato(
     }
   }
 
-  // 2. Contrato conhecido é a segunda fonte de verdade.
+  // 3. campos legados localidade, areaNome ou area, quando existirem
+  const legacyArea = (inspection as any).localidade || (inspection as any).areaNome || (inspection as any).area;
+  if (legacyArea) {
+    const group = getGrupoContratoPorLocalidade(legacyArea, areas, contracts);
+    if (group) return group;
+  }
+
+  // 4. contrato encontrado pelo contratoId
   if (inspection.contratoId) {
     const contract = contracts.find(c => c.id === inspection.contratoId);
     if (contract) {
@@ -147,6 +155,7 @@ export function getInspectionGrupoContrato(
       if (group) return group;
     }
 
+    // 5. nome histórico do contrato em deleted_names
     const deletedContractName = deletedNames[inspection.contratoId];
     if (deletedContractName) {
       const group = getGrupoContratoPorLocalidade(deletedContractName, areas, contracts);
@@ -154,13 +163,20 @@ export function getInspectionGrupoContrato(
     }
   }
 
-  // 3. O campo explícito canônico é o último fallback seguro. O contrato de
-  // uma inspeção nunca é inferido pelo supervisor: uma pessoa pode atuar nos
-  // dois contratos e esse atalho era a causa da mistura Vale/VLI.
+  // 6. campos legados contratoNome, contrato ou código, quando existirem
+  const legacyContract = (inspection as any).contratoNome || (inspection as any).contrato || (inspection as any).codigo;
+  if (legacyContract) {
+    const group = getGrupoContratoPorLocalidade(legacyContract, areas, contracts);
+    if (group) return group;
+  }
+
+  // 7. grupoContrato canônico já existente
+  // O contrato de uma inspeção nunca é inferido pelo supervisor.
   if (inspection.grupoContrato === "vli" || inspection.grupoContrato === "vale") {
     return inspection.grupoContrato;
   }
 
+  // 8. nao_classificado
   return "nao_classificado";
 }
 
@@ -240,11 +256,7 @@ export const isFarolVli = (supervisor: Supervisor) => {
   return isSupervisorFromGrupoContrato(supervisor, "vli");
 };
 
-export const getOperationalWeek = () => {
-  const start = new Date("2026-07-09T00:00:00");
-  const end = new Date("2026-07-16T23:59:59.999");
-  return { start, end };
-};
+export { getOperationalWeek } from "./operationalWeek";
 
 export const formatOperationalDate = (date: Date) => date.toLocaleDateString("pt-BR");
 

@@ -46,7 +46,7 @@ import {
   getNormalizedInspectionDate
 } from "../utils/inspectionUtils";
 
-import { inspectionBelongsToSupervisor, supervisorMatchesId, normalizeText } from "../utils/supervisors";
+import { inspectionBelongsToSupervisor, supervisorMatchesId, normalizeText, getInspectionSupervisorName } from "../utils/supervisors";
 import { useOperationalDate } from "../utils/useOperationalDate";
 
 interface HistoricoViewProps {
@@ -183,8 +183,20 @@ export default function HistoricoView({
   };
 
   // Helper resolvers
-  const getSupervisorName = (id: string) => supervisors.find((s) => supervisorMatchesId(s, id))?.nome || (currentUser?.id === id ? currentUser.nome : "") || dbService.getDeletedNames()[id] || "Outros";
-  const getAreaName = (id: string) => areas.find((a) => a.id === id)?.nome || dbService.getDeletedNames()[id] || "Outros";
+  const getSupervisorName = (id: string, item?: Inspection) => {
+    if (item) {
+      const name = getInspectionSupervisorName(item, supervisors, dbService.getDeletedNames());
+      if (name && name !== "Outros") return name;
+    }
+    return supervisors.find((s) => supervisorMatchesId(s, id))?.nome || (currentUser?.id === id ? currentUser.nome : "") || dbService.getDeletedNames()[id] || "Outros";
+  };
+  const getAreaName = (id: string, item?: Inspection) => {
+    if (item) {
+      const direct = (item as any).areaNome || (item as any).area;
+      if (direct && typeof direct === "string" && direct.trim()) return direct.trim();
+    }
+    return areas.find((a) => a.id === id)?.nome || dbService.getDeletedNames()[id] || "Outros";
+  };
   const getContractCode = (id: string) => contracts.find((c) => c.id === id)?.codigo || dbService.getDeletedNames()[id] || "Contrato Geral";
 
   // Map filteredInspections to memoized list filtered by active month and criteria
@@ -215,8 +227,8 @@ export default function HistoricoView({
       // Search term
       if (searchTerm.trim()) {
         const term = searchTerm.trim().toLowerCase();
-        const supName = getSupervisorName(item.supervisorId).toLowerCase();
-        const areaName = getAreaName(item.areaId).toLowerCase();
+        const supName = getSupervisorName(item.supervisorId, item).toLowerCase();
+        const areaName = getAreaName(item.areaId, item).toLowerCase();
         const contractCode = getContractCode(item.contratoId).toLowerCase();
         const desc = (item.descricao || "").toLowerCase();
         const id = (item.id || "").toLowerCase();
@@ -451,11 +463,11 @@ export default function HistoricoView({
                   </td>
                   {/* Supervisor */}
                   <td className="py-3.5 px-3 font-bold text-gray-900">
-                    {getSupervisorName(item.supervisorId)}
+                    {getSupervisorName(item.supervisorId, item)}
                   </td>
                   {/* Area */}
                   <td className="py-3.5 px-3 text-gray-500 max-w-[150px] truncate">
-                    {getAreaName(item.areaId)}
+                    {getAreaName(item.areaId, item)}
                   </td>
                   {/* Tipo de Lançamento */}
                   <td className="py-3.5 px-3">
@@ -634,11 +646,11 @@ export default function HistoricoView({
                 </div>
                 <div>
                   <span className="block text-[10px] text-gray-400 font-bold uppercase">Supervisor</span>
-                  <span className="font-bold text-gray-800">{getSupervisorName(viewingInspection.supervisorId)}</span>
+                  <span className="font-bold text-gray-800">{getSupervisorName(viewingInspection.supervisorId, viewingInspection)}</span>
                 </div>
                 <div>
                   <span className="block text-[10px] text-gray-400 font-bold uppercase">Área</span>
-                  <span className="font-bold text-gray-800">{getAreaName(viewingInspection.areaId)}</span>
+                  <span className="font-bold text-gray-800">{getAreaName(viewingInspection.areaId, viewingInspection)}</span>
                 </div>
                 <div>
                   <span className="block text-[10px] text-gray-400 font-bold uppercase">Contrato</span>

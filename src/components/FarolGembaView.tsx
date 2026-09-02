@@ -61,6 +61,7 @@ interface SupervisorRowData {
   lvcc: number;
   dial: number;
   dss: number;
+  ar: number;
   presencaEmCampo: number;
   estrutural: number;
   comportamental: number;
@@ -128,6 +129,7 @@ export default function FarolGembaView({
         const lvcc = ownInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "LVCC").length;
         const dial = ownInsps.filter(isDialInspection).length;
         const dss = ownInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "DSS").length;
+        const ar = ownInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "AR").length;
         const estrutural = ownInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Desvio Estrutural").length;
         const comportamental = ownInsps.filter(isDesvioComportamentalInspection).length;
         const notificacao = ownInsps.filter((i) => getTipoLancamento(i.atividade, i.tipo, i.tipoLancamento) === "Notificação").length;
@@ -154,6 +156,7 @@ export default function FarolGembaView({
           lvcc,
           dial,
           dss,
+          ar,
           presencaEmCampo,
           estrutural,
           comportamental,
@@ -239,6 +242,7 @@ export default function FarolGembaView({
                 <th className="py-3 px-3 text-center">LVCC</th>
                 <th className="py-3 px-3 text-center">DIAL</th>
                 <th className="py-3 px-3 text-center">DSS</th>
+                <th className="py-3 px-3 text-center">AR</th>
                 <th className="py-3 px-3 text-center">Presença em Campo</th>
                 <th className="py-3 px-3 text-center">Desvio Estrutural</th>
                 <th className="py-3 px-3 text-center">Desvio Comportamental</th>
@@ -286,6 +290,9 @@ export default function FarolGembaView({
                     
                     {/* DSS */}
                     <td className="py-3 px-3 text-center font-bold text-slate-600">{row.dss}</td>
+
+                    {/* AR */}
+                    <td className="py-3 px-3 text-center font-bold text-slate-600">{row.ar}</td>
                     
                     {/* Presença em Campo */}
                     <td className="py-3 px-3 text-center font-bold text-slate-600 bg-purple-50/20">{row.presencaEmCampo}</td>
@@ -323,7 +330,7 @@ export default function FarolGembaView({
               })}
               {rows.length === 0 && (
                 <tr>
-                  <td colSpan={13} className="py-8 text-center text-gray-400 font-bold">
+                  <td colSpan={14} className="py-8 text-center text-gray-400 font-bold">
                     Nenhum supervisor ativo cadastrado para este contrato.
                   </td>
                 </tr>
@@ -347,7 +354,7 @@ export default function FarolGembaView({
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 rounded-xl border border-blue-100 bg-blue-50/60 px-4 py-3">
         <div className="flex flex-col sm:flex-row sm:items-center gap-3">
           <div>
-            <span className="text-[10px] font-black uppercase tracking-widest text-[#F58220]">Mês de Análise</span>
+            <span className="text-[10px] font-black uppercase tracking-widest text-[#F58220]">Mês de Análise Operacional</span>
             <div className="flex items-center gap-2 text-sm font-extrabold text-[#0B2E59] mt-0.5">
               <CalendarDays size={16} /> {getMonthLabel(activeMonth)}
             </div>
@@ -414,13 +421,43 @@ export default function FarolGembaView({
         
         <div className="flex flex-col items-end gap-1.5">
           <span className="flex items-center gap-2 text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-3 py-1.5">
-            <Radio size={12} className="animate-pulse" /> Atualização automática com os dados recebidos
+            <Radio size={12} className="animate-pulse" /> Sincronizado com o Calendário Operacional
           </span>
           {isDashboardFiltered && (
             <span className="flex items-center gap-1 text-[9px] font-black uppercase tracking-wider text-[#F58220] bg-orange-50 border border-orange-100 rounded-md px-2 py-1">
               <Filter size={10} /> Resultado considerando os filtros aplicados
             </span>
           )}
+        </div>
+      </div>
+
+      {/* Monthly Operational Metrics Bar */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div className="bg-white p-3 rounded-xl border border-gray-100 shadow-2xs">
+          <span className="text-[9px] font-extrabold text-gray-400 uppercase tracking-wider block">Total no Mês</span>
+          <span className="text-xl font-black text-[#0B2E59] mt-0.5 block">{displayedMonth.length}</span>
+          <span className="text-[10px] text-gray-500 font-semibold">Lançamentos no calendário</span>
+        </div>
+        <div className="bg-white p-3 rounded-xl border border-gray-100 shadow-2xs">
+          <span className="text-[9px] font-extrabold text-gray-400 uppercase tracking-wider block">Supervisores Avaliados</span>
+          <span className="text-xl font-black text-[#0B2E59] mt-0.5 block">
+            {(grupoContrato === "vale" ? valeRows : grupoContrato === "vli" ? vliRows : [...valeRows, ...vliRows]).length}
+          </span>
+          <span className="text-[10px] text-gray-500 font-semibold">No Farol GEMBA</span>
+        </div>
+        <div className="bg-white p-3 rounded-xl border border-gray-100 shadow-2xs">
+          <span className="text-[9px] font-extrabold text-gray-400 uppercase tracking-wider block">Dias com Lançamento</span>
+          <span className="text-xl font-black text-[#F58220] mt-0.5 block">
+            {new Set(displayedMonth.map(i => i.data?.split("T")[0])).size}
+          </span>
+          <span className="text-[10px] text-gray-500 font-semibold">Dias ativos no mês</span>
+        </div>
+        <div className="bg-white p-3 rounded-xl border border-gray-100 shadow-2xs">
+          <span className="text-[9px] font-extrabold text-gray-400 uppercase tracking-wider block">Pontuação Total</span>
+          <span className="text-xl font-black text-emerald-600 mt-0.5 block">
+            {calculateInspectionScore(displayedMonth)}
+          </span>
+          <span className="text-[10px] text-gray-500 font-semibold">Pontos acumulados</span>
         </div>
       </div>
 
@@ -460,6 +497,7 @@ export default function FarolGembaView({
               <li>Desvio Comportamental: 2 pontos</li>
               <li>Desvio Estrutural: 2 pontos</li>
               <li>DSS: 1 ponto</li>
+              <li>AR (Análise de Risco): 1 ponto</li>
               <li>Presença em Campo: 1 ponto</li>
             </ul>
           </div>

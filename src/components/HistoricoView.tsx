@@ -44,7 +44,8 @@ import {
   getInspectionMonthKey,
   getMonthOptions,
   getNormalizedInspectionDate,
-  formatDateDisplay
+  formatDateDisplay,
+  isAllMonths
 } from "../utils/inspectionUtils";
 
 import { inspectionBelongsToSupervisor, supervisorMatchesId, normalizeText, getInspectionSupervisorName } from "../utils/supervisors";
@@ -204,12 +205,17 @@ export default function HistoricoView({
 
   // Map filteredInspections to memoized list filtered by active month and criteria
   const filteredInspections = useMemo(() => {
+    const isAll = isAllMonths(activeMonth);
+    const seenIds = new Set<string>();
+
     return inspections.filter((item) => {
+      if (!item || !item.id || seenIds.has(item.id)) return false;
+
       // Líder de Equipe: visualiza apenas os próprios lançamentos
       if (isTeamLeader && !isOwnInspection(item)) return false;
 
       // Month filter
-      if (activeMonth !== "all_months") {
+      if (!isAll) {
         const monthKey = getInspectionMonthKey(item);
         if (monthKey !== effectiveMonthKey) return false;
       }
@@ -247,6 +253,7 @@ export default function HistoricoView({
           return false;
         }
       }
+      seenIds.add(item.id);
       return true;
     });
   }, [
@@ -356,7 +363,7 @@ export default function HistoricoView({
           <div className="flex flex-col gap-1">
             <span className="text-[10px] font-bold text-gray-500 uppercase">Mês de Referência</span>
             <select
-              value={activeMonth}
+              value={isAllMonths(activeMonth) ? "all" : activeMonth}
               onChange={(e) => handleMonthChange(e.target.value)}
               className="text-xs bg-gray-50 border border-gray-150 rounded-lg p-2 text-gray-800 font-extrabold"
             >

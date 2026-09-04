@@ -129,9 +129,20 @@ export function getOperationalDateKey(now: Date = new Date()): string {
   return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Sao_Paulo", year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
 }
 
+export function isAllMonths(selectedMonth?: string | null): boolean {
+  if (!selectedMonth) return false;
+  const s = selectedMonth.trim().toLowerCase();
+  return s === "all" || s === "all_months" || s === "todos" || s === "todos_os_meses";
+}
+
 export function getEffectiveMonthKey(selectedMonth: string, today = getOperationalDateKey()): string {
-  return !selectedMonth || selectedMonth === "auto" || selectedMonth === "all_months"
-    ? today.slice(0, 7) : selectedMonth;
+  if (!selectedMonth || selectedMonth === "auto") {
+    return today.slice(0, 7);
+  }
+  if (isAllMonths(selectedMonth)) {
+    return "all";
+  }
+  return selectedMonth;
 }
 
 export const MONTH_NAMES_PT = [
@@ -143,7 +154,7 @@ export function getMonthOptions(inspections?: Inspection[]) {
   const currentYear = Number(getOperationalDateKey().slice(0,4));
   const options: { value: string; label: string }[] = [
     { value: "auto", label: "Automático / Mês atual" },
-    { value: "all_months", label: "Todos os Meses (Histórico Completo)" }
+    { value: "all", label: "Todos os Meses (Histórico Completo)" }
   ];
 
   const monthSet = new Set<string>();
@@ -176,28 +187,88 @@ export function getMonthOptions(inspections?: Inspection[]) {
   return options;
 }
 
-export function getUniqueMonthlyInspections(
+/**
+ * Filtra inspeções respeitando estritamente o filtro mensal ou consolidando todos os meses.
+ * Quando selectedMonth for "all" (ou "all_months"):
+ * - não aplica currentMonth;
+ * - não aplica mês atual como fallback;
+ * - não compara com uma única competência;
+ * - inclui julho, agosto, setembro e meses futuros disponíveis;
+ * - deduplica exclusivamente por document.id.
+ */
+export function filterInspectionsByMonth(
   inspections: Inspection[],
-  selectedYearMonth: string
+  selectedMonth: string,
+  today = getOperationalDateKey()
 ): Inspection[] {
   if (!inspections || !Array.isArray(inspections)) return [];
 
-  const effectiveKey = getEffectiveMonthKey(selectedYearMonth);
+  // Deduplicar exclusivamente por document.id
   const seenIds = new Set<string>();
-  const result: Inspection[] = [];
+  const inspectionsAllowed: Inspection[] = [];
+  for (const item of inspections) {
+    if (!item || !item.id || seenIds.has(item.id)) continue;
+    seenIds.add(item.id);
+    inspectionsAllowed.push(item);
+  }
 
-  for (const insp of inspections) {
-    if (!insp || !insp.id) continue;
-    if (seenIds.has(insp.id)) continue;
+  if (isAllMonths(selectedMonth)) {
+    return inspectionsAllowed;
+  }
 
-    const monthKey = getInspectionMonthKey(insp);
-    if (monthKey === effectiveKey) {
-      seenIds.add(insp.id);
-      result.push(insp);
+  const effectiveMonth = (!selectedMonth || selectedMonth === "auto") ? today.slice(0, 7) : selectedMonth;
+  return inspectionsAllowed.filter(
+    (inspection) => getInspectionMonthKey(inspection) === effectiveMonth
+  );
+}
+
+export function getUniqueMonthlyInspections(
+  inspections: Inspection[],
+  selectedYearMonth: string,
+  today = getOperationalDateKey()
+): Inspection[] {
+  return filterInspectionsByMonth(inspections, selectedYearMonth, today);
+}
+
+/**
+ * Retorna dinamicamente os meses incluídos no período para cálculo de metas acumuladas.
+ * VLI iniciou em julho/2026 ("2026-07"). Vale iniciou em setembro/2026 ("2026-09").
+ * Inclui os meses decorridos até o mês operacional atual mais quaisquer meses futuros com lançamentos.
+ */
+export function getIncludedMonths(
+  grupoContrato: string = "todos",
+  inspections?: Inspection[],
+  todayKey = getOperationalDateKey()
+): string[] {
+  const currentMonthKey = todayKey.slice(0, 7);
+  const startMonth = (grupoContrato === "vale") ? "2026-09" : "2026-07";
+
+  const monthSet = new Set<string>();
+
+  // Adiciona meses corridos desde o início do contrato até o mês operacional atual
+  let [y, m] = startMonth.split("-").map(Number);
+  const [curY, curM] = currentMonthKey.split("-").map(Number);
+
+  while (y < curY || (y === curY && m <= curM)) {
+    monthSet.add(`${y}-${String(m).padStart(2, "0")}`);
+    m++;
+    if (m > 12) {
+      m = 1;
+      y++;
     }
   }
 
-  return result;
+  // Adiciona quaisquer meses futuros onde existam inspeções registradas para o contrato
+  if (Array.isArray(inspections)) {
+    for (const insp of inspections) {
+      const k = getInspectionMonthKey(insp);
+      if (k && k >= startMonth) {
+        monthSet.add(k);
+      }
+    }
+  }
+
+  return Array.from(monthSet).sort();
 }
 
 export function getCanonicalInspectionCategory(inspection: Inspection): string {

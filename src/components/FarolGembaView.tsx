@@ -4,7 +4,7 @@ import { inspectionBelongsToSupervisor, resolveInspectionSupervisor, supervisorM
 import React, { useState, useMemo } from "react";
 import { CalendarDays, Radio, Trophy, Filter, HelpCircle, Building2, CheckCircle2 } from "lucide-react";
 import { Area, Contract, GrupoContrato, GrupoContratoFiltro, Inspection, Supervisor, isDialInspection, isDesvioComportamentalInspection } from "../types";
-import { getUniqueMonthlyInspections, getEffectiveMonthKey, getMonthOptions } from "../utils/inspectionUtils";
+import { getUniqueMonthlyInspections, getEffectiveMonthKey, getMonthOptions, isAllMonths, getIncludedMonths } from "../utils/inspectionUtils";
 import { calculateInspectionScore } from "../utils/scoring";
 import {
   deveParticiparFarolGemba,
@@ -138,16 +138,18 @@ export default function FarolGembaView({
         const presencaEmCampo = ownInsps.filter(isPresencaEmCampo).length;
 
         const totalInspecoes = ownInsps.length;
-        const metaMensal = getSupervisorMetaMensal(sup);
-        const percentual = metaMensal > 0 ? Math.min(100, (totalInspecoes / metaMensal) * 100) : 0;
+        const isVli = isSupervisorFromGrupoContrato(sup, "vli");
+        const baseMetaMensal = getSupervisorMetaMensal(sup);
+        const isAll = isAllMonths(activeMonth);
+        const monthsCount = isAll ? getIncludedMonths(isVli ? "vli" : "vale", inspections, operationalToday).length : 1;
+        const metaMensal = baseMetaMensal * monthsCount;
+        const percentual = metaMensal > 0 ? Math.min(100, Math.round((totalInspecoes / metaMensal) * 100)) : 0;
         const pontuacao = calculateInspectionScore(ownInsps);
 
         const lastTimestamp = ownInsps.reduce((latest, i) => {
           const timestamp = i.createdAt ? new Date(i.createdAt).getTime() : new Date(`${i.data}T00:00:00`).getTime();
           return Math.max(latest, timestamp);
         }, 0);
-
-        const isVli = isSupervisorFromGrupoContrato(sup, "vli");
 
         return {
           supervisor: sup,
@@ -178,7 +180,8 @@ export default function FarolGembaView({
   };
 
   const monthInspections = useMemo(() => {
-    return getUniqueMonthlyInspections(inspections, getEffectiveMonthKey(activeMonth, operationalToday));
+    const monthKey = isAllMonths(activeMonth) ? "all" : getEffectiveMonthKey(activeMonth, operationalToday);
+    return getUniqueMonthlyInspections(inspections, monthKey, operationalToday);
   }, [inspections, operationalToday, activeMonth]);
 
   // Contract isolation must happen before any Farol calculation. This prevents
@@ -350,12 +353,12 @@ export default function FarolGembaView({
           <div>
             <span className="text-[10px] font-black uppercase tracking-widest text-[#F58220]">Mês de Análise Operacional</span>
             <div className="flex items-center gap-2 text-sm font-extrabold text-[#0B2E59] mt-0.5">
-              <CalendarDays size={16} /> {getMonthLabel(activeMonth)}
+              <CalendarDays size={16} /> {isAllMonths(activeMonth) ? "Todos os Meses (Consolidado)" : getMonthLabel(activeMonth)}
             </div>
           </div>
           <div className="sm:ml-4">
             <select
-              value={activeMonth}
+              value={isAllMonths(activeMonth) ? "all" : activeMonth}
               onChange={(e) => handleMonthChange(e.target.value)}
               className="bg-white border border-gray-200 rounded-lg px-2.5 py-1 text-xs text-gray-700 focus:outline-none focus:ring-1 focus:ring-[#0B2E59] font-bold cursor-pointer"
             >

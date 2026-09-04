@@ -33,7 +33,10 @@ import {
   getEffectiveMonthKey,
   getMonthOptions,
   getUniqueMonthlyInspections,
-  getCanonicalInspectionCategory
+  getCanonicalInspectionCategory,
+  isAllMonths,
+  getIncludedMonths,
+  filterInspectionsByMonth
 } from "../utils/inspectionUtils";
 import {
   Users,
@@ -210,8 +213,17 @@ export default function DashboardView({
 
   // --- FILTERED INSPECTIONS ---
   const filteredInspections = useMemo(() => {
+    const isAll = isAllMonths(activeMonth);
+    const seenIds = new Set<string>();
+
     return inspections.filter((item) => {
-      if (activeMonth !== "all_months" && getInspectionMonthKey(item) !== effectiveMonthKey) return false;
+      if (!item || !item.id || seenIds.has(item.id)) return false;
+
+      // Month filter: when not "all", filter strictly by effectiveMonthKey
+      if (!isAll) {
+        if (getInspectionMonthKey(item) !== effectiveMonthKey) return false;
+      }
+
       // 1. Timeframe filter
       const itemDate = new Date(`${item.data}T00:00:00`);
       const today = normalizeInspectionDate(operationalToday);
@@ -226,12 +238,14 @@ export default function DashboardView({
         const { start, end } = activeOperationalWeek;
         if (itemDate < start || itemDate > end) return false;
       } else if (timeframe === "mensal") {
-        const [year, month] = effectiveMonthKey.split("-").map(Number);
-        const startOfMonth = new Date(year, month - 1, 1);
-        startOfMonth.setHours(0, 0, 0, 0);
-        const endOfMonth = new Date(year, month, 0);
-        endOfMonth.setHours(23, 59, 59, 999);
-        if (itemDate < startOfMonth || itemDate > endOfMonth) return false;
+        if (!isAll) {
+          const [year, month] = effectiveMonthKey.split("-").map(Number);
+          const startOfMonth = new Date(year, month - 1, 1);
+          startOfMonth.setHours(0, 0, 0, 0);
+          const endOfMonth = new Date(year, month, 0);
+          endOfMonth.setHours(23, 59, 59, 999);
+          if (itemDate < startOfMonth || itemDate > endOfMonth) return false;
+        }
       } else if (timeframe === "personalizado") {
         if (startDate) {
           const sDate = new Date(`${startDate}T00:00:00`);
@@ -272,6 +286,7 @@ export default function DashboardView({
         if (inspGrupo !== "vli") return false;
       }
 
+      seenIds.add(item.id);
       return true;
     });
   }, [inspections, activeMonth, effectiveMonthKey, operationalToday, timeframe, activeOperationalWeek, startDate, endDate, selectedSupervisorId, selectedAreaId, selectedTipo, selectedPotencial, grupoContrato, areas, contracts, supervisors]);
@@ -301,11 +316,48 @@ export default function DashboardView({
   // --- CENTRALIZED WEEKLY INSPECTIONS FOR MULTIPLE COMPONENTS ---
   const weeklyInspections = useMemo(() => {
     const { start, end } = activeOperationalWeek;
-    return filteredInspections.filter((item) => {
+    const seenIds = new Set<string>();
+
+    return inspections.filter((item) => {
+      if (!item || !item.id || seenIds.has(item.id)) return false;
+
+      // 1. Operational week timeframe
       const itemDate = new Date(`${item.data}T12:00:00`);
-      return itemDate >= start && itemDate <= end;
+      if (itemDate < start || itemDate > end) return false;
+
+      // 2. Supervisor filter
+      if (selectedSupervisorId !== "all" && !supervisorMatchesId(supervisors.find(s => s.id === selectedSupervisorId) || { id: selectedSupervisorId, nome: "" }, item.supervisorId)) {
+        return false;
+      }
+
+      // 3. Area filter
+      if (selectedAreaId !== "all" && item.areaId !== selectedAreaId) {
+        return false;
+      }
+
+      // 4. Type filter
+      if (selectedTipo !== "all" && getTipoLancamento(item.atividade, item.tipo, item.tipoLancamento) !== selectedTipo) {
+        return false;
+      }
+
+      // 5. Potential filter
+      if (selectedPotencial !== "all" && item.potencial !== selectedPotencial) {
+        return false;
+      }
+
+      // 6. Contract Group filter (Vale vs VLI)
+      if (grupoContrato === "vale") {
+        const inspGrupo = getInspectionGrupoContrato(item, areas, contracts, supervisors, dbService.getDeletedNames());
+        if (inspGrupo !== "vale") return false;
+      } else if (grupoContrato === "vli") {
+        const inspGrupo = getInspectionGrupoContrato(item, areas, contracts, supervisors, dbService.getDeletedNames());
+        if (inspGrupo !== "vli") return false;
+      }
+
+      seenIds.add(item.id);
+      return true;
     });
-  }, [filteredInspections, activeOperationalWeek]);
+  }, [inspections, activeOperationalWeek, selectedSupervisorId, selectedAreaId, selectedTipo, selectedPotencial, grupoContrato, areas, contracts, supervisors]);
 
   const isDashboardFiltered = useMemo(() => {
     return selectedAreaId !== "all" || selectedTipo !== "all" || selectedPotencial !== "all" || timeframe !== "all";
@@ -391,11 +443,13 @@ export default function DashboardView({
     }
   }, [effectiveMonthKey]);
 
-  const dashboardMonthKey = effectiveMonthKey;
+  const dashboardMonthKey = isAllMonths(activeMonth) ? "all" : effectiveMonthKey;
 
   const monthlyInspections = useMemo(() => {
-    const baseList = getUniqueMonthlyInspections(inspections, dashboardMonthKey);
+    const baseList = getUniqueMonthlyInspections(inspections, dashboardMonthKey, operationalToday);
+    const seenIds = new Set<string>();
     return baseList.filter((insp) => {
+      if (!insp || !insp.id || seenIds.has(insp.id)) return false;
       const inspGrupo = getInspectionGrupoContrato(insp, areas, contracts, supervisors, dbService.getDeletedNames());
       if (grupoContrato === "vale" && inspGrupo !== "vale") return false;
       if (grupoContrato === "vli" && inspGrupo !== "vli") return false;
@@ -403,9 +457,10 @@ export default function DashboardView({
       if (selectedAreaId !== "all" && insp.areaId !== selectedAreaId) return false;
       if (selectedTipo !== "all" && getTipoLancamento(insp.atividade, insp.tipo, insp.tipoLancamento) !== selectedTipo) return false;
       if (selectedPotencial !== "all" && insp.potencial !== selectedPotencial) return false;
+      seenIds.add(insp.id);
       return true;
     });
-  }, [inspections, dashboardMonthKey, selectedSupervisorId, selectedAreaId, selectedTipo, selectedPotencial, grupoContrato, areas, contracts, supervisors]);
+  }, [inspections, dashboardMonthKey, operationalToday, selectedSupervisorId, selectedAreaId, selectedTipo, selectedPotencial, grupoContrato, areas, contracts, supervisors]);
 
   const calendarDays = useMemo(() => {
     const year = currentCalendarMonth.getFullYear();
@@ -573,13 +628,31 @@ export default function DashboardView({
     const weeklyPercentage = Math.min(100, Math.round((totalWeeklyAchieved / totalWeeklyTarget) * 100));
 
     // Monthly progress
+    const isAll = isAllMonths(activeMonth);
     const goalSupervisors = selectedSupervisorId === "all" ? membrosMetaDashboard : selectedSupervisor ? [selectedSupervisor] : [];
     const monthlyTotalCount = selectedSupervisorId === "all"
       ? monthInspections.length
       : monthInspections.filter(i => selectedSupervisor ? inspectionBelongsToSupervisor(i, selectedSupervisor, supervisors, dbService.getDeletedNames()) : false).length;
-    const monthlyTarget = selectedSupervisorId === "all"
-      ? membrosMetaDashboard.reduce((sum, sup) => sum + monthlyGoal(sup), 0)
-      : monthlyGoal(selectedSupervisor);
+
+    let monthlyTarget = 0;
+    if (selectedSupervisorId === "all") {
+      if (grupoContrato === "todos") {
+        const vliMonths = isAll ? getIncludedMonths("vli", inspections, operationalToday).length : 1;
+        const valeMonths = isAll ? getIncludedMonths("vale", inspections, operationalToday).length : 1;
+        const vliTarget = getMembrosMetaDashboard(supervisors, "vli").reduce((sum, sup) => sum + monthlyGoal(sup), 0) * vliMonths;
+        const valeTarget = getMembrosMetaDashboard(supervisors, "vale").reduce((sum, sup) => sum + monthlyGoal(sup), 0) * valeMonths;
+        monthlyTarget = vliTarget + valeTarget;
+      } else {
+        const baseTarget = membrosMetaDashboard.reduce((sum, sup) => sum + monthlyGoal(sup), 0);
+        const monthsCount = isAll ? getIncludedMonths(grupoContrato, inspections, operationalToday).length : 1;
+        monthlyTarget = baseTarget * monthsCount;
+      }
+    } else {
+      const baseTarget = monthlyGoal(selectedSupervisor);
+      const supGroup = selectedSupervisor ? (isSupervisorFromGrupoContrato(selectedSupervisor, "vli") ? "vli" : "vale") : grupoContrato;
+      const monthsCount = isAll ? getIncludedMonths(supGroup, inspections, operationalToday).length : 1;
+      monthlyTarget = baseTarget * monthsCount;
+    }
     const monthlyPercentage = monthlyTarget > 0 ? Math.min(100, Math.round((monthlyTotalCount / monthlyTarget) * 100)) : 0;
 
     // Dynamic smart alerts with priorities
@@ -745,10 +818,12 @@ export default function DashboardView({
       monthlyPercentage,
       smartAlerts: smartAlertsList
     };
-  }, [weeklyInspections, monthlyInspections, filteredInspections, selectedSupervisorId, supervisors, grupoContrato]);
+  }, [weeklyInspections, monthlyInspections, filteredInspections, selectedSupervisorId, supervisors, grupoContrato, activeMonth, inspections, operationalToday]);
 
 
   const contractGoalSummaries = useMemo(() => {
+    const isAll = isAllMonths(activeMonth);
+
     const build = (group: GrupoContrato) => {
       const groupSupervisors = getMembrosMetaDashboard(supervisors, group);
       const groupWeek = weeklyInspections.filter(
@@ -759,7 +834,9 @@ export default function DashboardView({
       );
 
       const weeklyTarget = groupSupervisors.reduce((sum, sup) => sum + getSupervisorTargets(sup).weekly, 0);
-      const monthlyTarget = groupSupervisors.reduce((sum, sup) => sum + getSupervisorTargets(sup).monthly, 0);
+      const baseMonthlyTarget = groupSupervisors.reduce((sum, sup) => sum + getSupervisorTargets(sup).monthly, 0);
+      const monthsCount = isAll ? getIncludedMonths(group, inspections, operationalToday).length : 1;
+      const monthlyTarget = baseMonthlyTarget * monthsCount;
       const monthlyDone = groupMonth.filter(i => groupSupervisors.some(sup => inspectionBelongsToSupervisor(i, sup, supervisors))).length;
       const weeklyDone = groupSupervisors.reduce((sum, sup) => {
         const own = groupWeek.filter((insp) => inspectionBelongsToSupervisor(insp, sup, supervisors));
@@ -800,7 +877,7 @@ export default function DashboardView({
     };
 
     return { vale, vli, total };
-  }, [weeklyInspections, monthlyInspections, supervisors, areas, contracts]);
+  }, [weeklyInspections, monthlyInspections, supervisors, areas, contracts, activeMonth, inspections, operationalToday]);
 
   // --- NEW MEMOS FOR ADVANCED CARDS ---
   const topSupervisorsOfWeek = useMemo(() => {
@@ -1586,29 +1663,24 @@ export default function DashboardView({
         )}
       </div>
 
-      {filteredInspections.length === 0 ? (
-        <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-8 flex flex-col items-center justify-center text-center my-6 gap-4 py-16">
-          <div className="w-16 h-16 rounded-full bg-slate-50 flex items-center justify-center text-3xl shadow-inner animate-bounce">
-            🔍
+      {filteredInspections.length === 0 && (
+        <div className="bg-blue-50/70 border border-blue-200/60 text-[#0B2E59] px-4 py-3 rounded-xl flex items-center justify-between text-xs my-2">
+          <div className="flex items-center gap-2">
+            <span>ℹ️</span>
+            <span className="font-semibold">Nenhuma inspeção encontrada para o período ou filtros selecionados. Os cards, metas e estrutura operacional permanecem ativos com contadores zerados.</span>
           </div>
-          <div className="space-y-1.5 max-w-md">
-            <h3 className="text-sm font-black text-[#0B2E59] uppercase tracking-wider">
-              Nenhuma inspeção encontrada
-            </h3>
-            <p className="text-xs text-gray-400 font-semibold leading-relaxed">
-              Nenhuma inspeção encontrada para os filtros selecionados.
-            </p>
-          </div>
-          <button
-            onClick={resetFilters}
-            className="flex items-center gap-1.5 px-4 py-2 bg-[#0B2E59] text-white text-xs font-bold rounded-lg hover:bg-blue-900 transition-colors shadow-sm cursor-pointer"
-          >
-            <RefreshCw size={12} /> Limpar Todos os Filtros
-          </button>
+          {isDashboardFiltered && (
+            <button
+              onClick={resetFilters}
+              className="flex items-center gap-1 font-bold text-blue-900 hover:underline text-[11px] cursor-pointer"
+            >
+              <RefreshCw size={11} /> Limpar Filtros
+            </button>
+          )}
         </div>
-      ) : (
-        <>
-          {/* 2.0 META CARDS ROW */}
+      )}
+
+      {/* 2.0 META CARDS ROW */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 shrink-0">
         {/* META DA SEMANA */}
         <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-5 flex flex-col justify-between">
@@ -1704,12 +1776,12 @@ export default function DashboardView({
           </div>
         </div>
 
-        {/* META DO MÊS */}
+        {/* META DO MÊS / CONSOLIDADO DO PERÍODO */}
         <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-5 flex flex-col justify-between">
           <div>
             <div className="flex items-center justify-between border-b border-slate-50 pb-2 mb-3">
               <span className="text-xs font-black text-[#0B2E59] uppercase tracking-wider flex items-center gap-1.5">
-                📅 Meta do Mês
+                {isAllMonths(activeMonth) ? "📅 CONSOLIDADO DO PERÍODO" : "📅 Meta do Mês"}
               </span>
               <span className="text-[10px] bg-orange-50 text-[#F58220] px-2 py-0.5 rounded-full font-black uppercase tracking-wider">
                 {selectedSupervisorId === "all" ? "Equipe Completa" : "Individual"}
@@ -1741,7 +1813,9 @@ export default function DashboardView({
                     <div className="bg-[#0B2E59] h-full transition-all duration-500" style={{ width: `${contractGoalSummaries.total.monthlyPercentage}%` }} />
                   </div>
                 </div>
-                <p className="text-[10px] text-slate-400 font-bold uppercase text-center">Metas mensais separadas; total geral somente em Todos</p>
+                <p className="text-[10px] text-slate-400 font-bold uppercase text-center">
+                  {isAllMonths(activeMonth) ? "Consolidado do período por contrato; total geral em Todos" : "Metas mensais separadas; total geral somente em Todos"}
+                </p>
               </div>
             ) : (
             <div className="flex flex-col items-center justify-center py-4">
@@ -1774,10 +1848,12 @@ export default function DashboardView({
 
               <div className="text-center mt-4 space-y-1">
                 <p className="text-xs font-black text-slate-700">
-                  {selectedSupervisorId === "all" ? "Meta Mensal da Equipe" : "Meta Mensal Individual"}
+                  {isAllMonths(activeMonth)
+                    ? (selectedSupervisorId === "all" ? "Consolidado da Equipe" : "Consolidado Individual")
+                    : (selectedSupervisorId === "all" ? "Meta Mensal da Equipe" : "Meta Mensal Individual")}
                 </p>
                 <p className="text-[10px] text-slate-400 font-bold uppercase">
-                  Alvo: {targets.monthlyTarget} lançamentos
+                  {isAllMonths(activeMonth) ? `Meta acumulada: ${targets.monthlyTarget} lançamentos` : `Alvo: ${targets.monthlyTarget} lançamentos`}
                 </p>
               </div>
             </div>
@@ -1785,7 +1861,9 @@ export default function DashboardView({
           </div>
 
           <div className="pt-2 border-t border-slate-50 text-[10px] text-gray-400 font-bold uppercase tracking-wider text-center">
-            {grupoContrato === "todos" ? "Metas mensais Vale e VLI separadas" : (targets.monthlyTotalCount >= targets.monthlyTarget ? "🎉 Meta Mensal Atingida!" : "🚀 Lançamentos ativos na base")}
+            {isAllMonths(activeMonth)
+              ? `Progresso acumulado do período: ${targets.monthlyPercentage}%`
+              : (grupoContrato === "todos" ? "Metas mensais Vale e VLI separadas" : (targets.monthlyTotalCount >= targets.monthlyTarget ? "🎉 Meta Mensal Atingida!" : "🚀 Lançamentos ativos na base"))}
           </div>
         </div>
 
@@ -2836,8 +2914,6 @@ export default function DashboardView({
           </div>
         </div>
       </div>
-        </>
-      )}
 
       {/* FAROL GEMBA SECTION */}
       <div id="farol-gemba-dashboard-panel" className="bg-white p-5 rounded-xl shadow-sm border border-gray-100">

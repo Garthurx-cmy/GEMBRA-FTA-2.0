@@ -3,10 +3,23 @@ import { Inspection, getTipoLancamento } from "../types";
 export function getNormalizedInspectionDate(raw: any): string | null {
   if (!raw) return null;
 
-  // Handle Inspection object
-  const value = (typeof raw === "object" && raw !== null && "data" in raw && !("getTime" in raw) && !("toDate" in raw))
-    ? raw.data
-    : raw;
+  // Handle Inspection object or extract date from candidate fields
+  let value = raw;
+  if (typeof raw === "object" && raw !== null && !("getTime" in raw) && !("toDate" in raw)) {
+    const candidates = [
+      raw.data,
+      (raw as any).dataHora,
+      (raw as any).dataRealizacao,
+      (raw as any).dataCriacao,
+      (raw as any).dataHoraCriacao,
+      (raw as any).createdAt,
+      (raw as any).timestamp
+    ];
+    value = candidates.find(c => c !== undefined && c !== null && String(c).trim() !== "");
+    if (!value && typeof (raw as any).mesReferencia === "string" && (raw as any).mesReferencia.includes("-")) {
+      value = `${(raw as any).mesReferencia}-01`;
+    }
+  }
 
   if (!value) return null;
 
@@ -39,19 +52,51 @@ export function getNormalizedInspectionDate(raw: any): string | null {
   if (str.includes("-")) {
     const part = str.split("T")[0].split(" ")[0];
     const parts = part.split("-");
-    if (parts.length === 3 && parts[0].length === 4) {
-      return `${parts[0]}-${parts[1].padStart(2, "0")}-${parts[2].padStart(2, "0")}`;
+    if (parts.length === 3) {
+      if (parts[0].length === 4) {
+        return `${parts[0]}-${parts[1].padStart(2, "0")}-${parts[2].padStart(2, "0")}`;
+      }
+      if (parts[2].length === 4) {
+        return `${parts[2]}-${parts[1].padStart(2, "0")}-${parts[0].padStart(2, "0")}`;
+      }
     }
   }
 
   if (str.includes("/")) {
     const part = str.split(" ")[0];
     const parts = part.split("/");
-    if (parts.length === 3 && parts[2].length === 4) {
-      const y = parts[2];
-      const m = parts[1].padStart(2, "0");
-      const day = parts[0].padStart(2, "0");
-      return `${y}-${m}-${day}`;
+    if (parts.length === 3) {
+      if (parts[2].length === 4) {
+        const y = parts[2];
+        const m = parts[1].padStart(2, "0");
+        const day = parts[0].padStart(2, "0");
+        return `${y}-${m}-${day}`;
+      }
+      if (parts[0].length === 4) {
+        const y = parts[0];
+        const m = parts[1].padStart(2, "0");
+        const day = parts[2].padStart(2, "0");
+        return `${y}-${m}-${day}`;
+      }
+    }
+  }
+
+  if (str.includes(".")) {
+    const part = str.split(" ")[0];
+    const parts = part.split(".");
+    if (parts.length === 3) {
+      if (parts[2].length === 4) {
+        const y = parts[2];
+        const m = parts[1].padStart(2, "0");
+        const day = parts[0].padStart(2, "0");
+        return `${y}-${m}-${day}`;
+      }
+      if (parts[0].length === 4) {
+        const y = parts[0];
+        const m = parts[1].padStart(2, "0");
+        const day = parts[2].padStart(2, "0");
+        return `${y}-${m}-${day}`;
+      }
     }
   }
 
@@ -97,7 +142,8 @@ export const MONTH_NAMES_PT = [
 export function getMonthOptions(inspections?: Inspection[]) {
   const currentYear = Number(getOperationalDateKey().slice(0,4));
   const options: { value: string; label: string }[] = [
-    { value: "auto", label: "Automático / Mês atual" }
+    { value: "auto", label: "Automático / Mês atual" },
+    { value: "all_months", label: "Todos os Meses (Histórico Completo)" }
   ];
 
   const monthSet = new Set<string>();
@@ -158,3 +204,14 @@ export function getCanonicalInspectionCategory(inspection: Inspection): string {
   if (!inspection) return "Outros";
   return getTipoLancamento(inspection.atividade, inspection.tipo, inspection.tipoLancamento);
 }
+
+export function formatDateDisplay(raw: any, fallback = "-"): string {
+  const normalized = getNormalizedInspectionDate(raw);
+  if (!normalized) return fallback;
+  const parts = normalized.split("-");
+  if (parts.length === 3) {
+    return `${parts[2]}/${parts[1]}/${parts[0]}`;
+  }
+  return normalized;
+}
+

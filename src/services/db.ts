@@ -9,7 +9,7 @@ import {
   LegacyReconciliationItem, LegacyReconciliationPreview
 } from "../types";
 import { isOperationalRole } from "../utils/supervisors";
-import { getInspectionMonthKey } from "../utils/inspectionUtils";
+import { getInspectionMonthKey, getNormalizedInspectionDate } from "../utils/inspectionUtils";
 import {
   getInspectionGrupoContrato,
   isFarolVli,
@@ -323,7 +323,26 @@ export function normalizeUserProfile(data: any, docId?: string): UserProfile {
   };
 }
 
+function safeDbUUID(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    try {
+      return crypto.randomUUID();
+    } catch (_) {}
+  }
+  return `${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 11)}`;
+}
+
 class DBService {
+  createPendingInspectionId(): string {
+    if (db) {
+      try {
+        const autoId = doc(collection(db, "inspections")).id;
+        if (autoId) return autoId;
+      } catch (_) {}
+    }
+    return `insp_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 10)}`;
+  }
+  private rawInspectionDocs: Inspection[] = [];
   private inspections: Inspection[] = [];
   private supervisors: Supervisor[] = [];
   private areas: Area[] = [];
@@ -337,6 +356,10 @@ class DBService {
   private unsubscribers: Array<() => void> = [];
   private metadataPreloaded = false;
   private hasReconciledSupervisors = false;
+  private currentSyncProfile?: UserProfile;
+  private currentPermittedGroups: GrupoContrato[] = [];
+  private currentIsAdmin = false;
+  private currentIsGestor = false;
   private inspectionSync: {
     status: "idle" | "loading" | "cache" | "pending" | "ready" | "error";
     errorCode: string | null;
@@ -409,6 +432,33 @@ class DBService {
     };
   }
 
+  private recomputeInspections(): void {
+    if (!this.currentSyncProfile || this.currentSyncProfile.ativo === false || this.currentPermittedGroups.length === 0) {
+      this.inspections = [];
+      return;
+    }
+
+    let authorizedDocs = this.rawInspectionDocs;
+    if (!this.currentIsAdmin && !this.currentIsGestor) {
+      authorizedDocs = this.rawInspectionDocs.filter((insp) => {
+        const group = getInspectionGrupoContrato(
+          insp,
+          this.areas,
+          this.contracts,
+          this.supervisors,
+          this.deletedNames
+        );
+        return group !== "nao_classificado" && this.currentPermittedGroups.includes(group as GrupoContrato);
+      });
+    }
+
+    this.inspections = authorizedDocs.sort(
+      (a, b) =>
+        String(getNormalizedInspectionDate(b) || b.data || "").localeCompare(String(getNormalizedInspectionDate(a) || a.data || "")) ||
+        String(b.createdAt || "").localeCompare(String(a.createdAt || ""))
+    );
+  }
+
   startSync(currentProfile?: UserProfile): void {
     if (this.syncActive || !hasFirebase || !db || !currentProfile || currentProfile.ativo === false) return;
     this.syncActive = true;
@@ -418,13 +468,18 @@ class DBService {
     const isAdmin = role === "Desenvolvedor/Admin" || role === "Administrador";
     const isGestor = role === "Gestor";
     
-    // Keep server-side contract restrictions for non-admin/non-manager users.
+    // Contract restrictions resolved dynamically in memory without excluding legacy docs
     const rawGroups = currentProfile.gruposContratoPermitidos as unknown;
     const requestedGroups = Array.isArray(rawGroups) ? rawGroups :
       typeof rawGroups === "string" ? rawGroups.toLowerCase().split(/[^a-z]+/) : [];
     const permittedGroups: GrupoContrato[] = isAdmin || isGestor ? ["vale", "vli"] :
       [...new Set(requestedGroups.map(group => String(group).trim().toLowerCase())
         .filter((group): group is GrupoContrato => group === "vale" || group === "vli"))];
+
+    this.currentSyncProfile = currentProfile;
+    this.currentPermittedGroups = permittedGroups;
+    this.currentIsAdmin = isAdmin;
+    this.currentIsGestor = isGestor;
 
     // 1. Settings (config) - Global listener
     this.unsubscribers.push(onSnapshot(doc(db, "settings", "config"), snap => {
@@ -440,6 +495,10 @@ class DBService {
     this.unsubscribers.push(onSnapshot(collection(db, "deleted_names"), snap => {
       this.deletedNames = Object.fromEntries(snap.docs.map(d => [d.id, d.data().name || "Registro removido"]));
       this.readiness.deletedNamesReady = true;
+      if (this.rawInspectionDocs.length > 0) {
+        this.recomputeInspections();
+        this.emit("inspections");
+      }
       this.emit("deleted_names");
     }, err => {
       console.error("Falha ao sincronizar nomes removidos:", err);
@@ -466,6 +525,10 @@ class DBService {
         this.supervisors = allSups;
       }
       this.readiness.supervisorsReady = true;
+      if (this.rawInspectionDocs.length > 0) {
+        this.recomputeInspections();
+        this.emit("inspections");
+      }
       this.emit("supervisors");
     }, err => {
       console.error("Falha ao sincronizar supervisores:", err);
@@ -482,6 +545,10 @@ class DBService {
         this.areas = allAreas;
       }
       this.readiness.areasReady = true;
+      if (this.rawInspectionDocs.length > 0) {
+        this.recomputeInspections();
+        this.emit("inspections");
+      }
       this.emit("areas");
     }, err => {
       console.error("Falha ao sincronizar áreas:", err);
@@ -501,51 +568,53 @@ class DBService {
         this.contracts = allContracts;
       }
       this.readiness.contractsReady = true;
+      if (this.rawInspectionDocs.length > 0) {
+        this.recomputeInspections();
+        this.emit("inspections");
+      }
       this.emit("contracts");
     }, err => {
       console.error("Falha ao sincronizar contratos:", err);
       this.readiness.contractsReady = true;
     }));
 
-    // Admin, gestores receive the full history without server-side restrictions.
-    // Classification between Vale and VLI is resolved dynamically in memory via getInspectionGrupoContrato.
-    // Non-admin / non-manager roles remain constrained to their permitted contract groups.
-    const inspectionsRef = collection(db, "inspections");
-    let inspQuery: any = inspectionsRef;
-
-    if (!isAdmin && !isGestor) {
-      if (permittedGroups.length === 1) {
-        inspQuery = query(inspectionsRef, where("grupoContrato", "==", permittedGroups[0]));
-      } else if (permittedGroups.length > 1) {
-        inspQuery = query(inspectionsRef, where("grupoContrato", "in", permittedGroups));
-      } else {
-        inspQuery = query(inspectionsRef, where("grupoContrato", "in", []));
-      }
+    // 7. Inspections - Single unified listener on the full inspections collection.
+    // Classification between Vale and VLI and filtering by permitted contract groups
+    // are executed strictly in memory to preserve all 411+ historical documents without modifying Firestore.
+    if (permittedGroups.length === 0) {
+      this.rawInspectionDocs = [];
+      this.inspections = [];
+      this.readiness.inspectionsReady = true;
+      this.inspectionSync = { status: "ready", errorCode: null, lastServerSnapshotAt: new Date().toISOString() };
+      this.emit("inspections");
+    } else {
+      const inspectionsRef = collection(db, "inspections");
+      this.unsubscribers.push(onSnapshot(inspectionsRef, { includeMetadataChanges: true }, snap => {
+        const metadata = snap.metadata || { fromCache: false, hasPendingWrites: false };
+        // Empty cache is not proof of an empty server collection. Keep the last data.
+        if (!(metadata.fromCache && snap.empty)) {
+          const docMap = new Map<string, Inspection>();
+          for (const d of snap.docs) {
+            docMap.set(d.id, { ...this.convert(d.data()), id: d.id } as Inspection);
+          }
+          this.rawInspectionDocs = Array.from(docMap.values());
+          this.recomputeInspections();
+          this.readiness.inspectionsReady = true;
+        }
+        this.inspectionSync = {
+          status: metadata.fromCache ? "cache" : metadata.hasPendingWrites ? "pending" : "ready",
+          errorCode: null,
+          lastServerSnapshotAt: !metadata.fromCache && !metadata.hasPendingWrites
+            ? new Date().toISOString() : this.inspectionSync.lastServerSnapshotAt
+        };
+        this.emit("inspections");
+      }, err => {
+        console.error("Falha ao carregar histórico de inspeções:", err);
+        this.inspectionSync = { ...this.inspectionSync, status: "error", errorCode: err?.code || "unavailable" };
+        // Keep previous records. A failed read must never be presented as zero records.
+        this.emit("inspections");
+      }));
     }
-
-    this.unsubscribers.push(onSnapshot(inspQuery, { includeMetadataChanges: true }, snap => {
-      const metadata = snap.metadata || { fromCache: false, hasPendingWrites: false };
-      // Empty cache is not proof of an empty server collection. Keep the last data.
-      if (!(metadata.fromCache && snap.empty)) {
-        this.inspections = snap.docs
-          .map(d => ({ ...this.convert(d.data()), id: d.id } as Inspection))
-          .sort((a, b) => String(b.data || "").localeCompare(String(a.data || "")) ||
-            String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
-        this.readiness.inspectionsReady = true;
-      }
-      this.inspectionSync = {
-        status: metadata.fromCache ? "cache" : metadata.hasPendingWrites ? "pending" : "ready",
-        errorCode: null,
-        lastServerSnapshotAt: !metadata.fromCache && !metadata.hasPendingWrites
-          ? new Date().toISOString() : this.inspectionSync.lastServerSnapshotAt
-      };
-      this.emit("inspections");
-    }, err => {
-      console.error("Falha ao carregar histórico de inspeções:", err);
-      this.inspectionSync = { ...this.inspectionSync, status: "error", errorCode: err?.code || "unavailable" };
-      // Keep previous records. A failed read must never be presented as zero records.
-      this.emit("inspections");
-    }));
 
     // 8. Admin-only reads. Synchronization never reconciles or deletes records.
     if (isAdmin) {
@@ -629,6 +698,11 @@ class DBService {
     this.syncActive = false;
     this.hasReconciledSupervisors = false;
     if (clearData) {
+      this.currentSyncProfile = undefined;
+      this.currentPermittedGroups = [];
+      this.currentIsAdmin = false;
+      this.currentIsGestor = false;
+      this.rawInspectionDocs = [];
       this.inspectionSync = { status: "idle", errorCode: null, lastServerSnapshotAt: null };
       this.inspections = [];
       this.supervisors = [];
@@ -850,7 +924,7 @@ class DBService {
 
   private async addAuditLog(action: string, entity: string, entityId: string, details?: Record<string, unknown>) {
     if (!db || !auth?.currentUser) return;
-    const id = `audit_${crypto.randomUUID()}`;
+    const id = `audit_${safeDbUUID()}`;
     await setDoc(doc(db, "auditLogs", id), {
       id, action, entity, entityId,
       userId: auth.currentUser.uid,
@@ -898,6 +972,22 @@ class DBService {
       throw getFriendlyInspectionSaveError(error);
     }
 
+    // Atualização otimista e consistente na memória imediatamente após confirmação
+    const confirmedIndex = this.inspections.findIndex(i => i.id === inspection.id);
+    const savedRecord = { ...inspection, ...payload } as Inspection;
+    if (confirmedIndex >= 0) {
+      this.inspections[confirmedIndex] = savedRecord;
+    } else {
+      this.inspections.unshift(savedRecord);
+    }
+
+    const rawIndex = this.rawInspectionDocs.findIndex(i => i.id === inspection.id);
+    if (rawIndex >= 0) {
+      this.rawInspectionDocs[rawIndex] = savedRecord;
+    } else {
+      this.rawInspectionDocs.unshift(savedRecord);
+    }
+
     const supName = this.supervisors.find(s => s.id === inspection.supervisorId)?.nome || this.users.find(u => u.id === inspection.supervisorId)?.nome || (auth?.currentUser?.uid === inspection.supervisorId ? (auth.currentUser.displayName || auth.currentUser.email) : "") || "Usuário";
     // Auditoria e notificação são complementares. Falha de permissão nessas
     // coleções nunca pode bloquear um lançamento já confirmado em inspections.
@@ -908,7 +998,7 @@ class DBService {
       results.forEach((result) => {
         if (result.status === "rejected") console.warn("Gravação auxiliar não bloqueante falhou:", result.reason);
       });
-    });
+    }).catch(() => undefined);
   }
 
   async deleteInspection(id: string): Promise<void> {
@@ -1180,7 +1270,7 @@ class DBService {
 
   async addNotification(userName: string, action: string, tipoLancamento?: string) {
     this.assertFirebase();
-    const id = `notif_${crypto.randomUUID()}`;
+    const id = `notif_${safeDbUUID()}`;
     const now = new Date();
     const payload: AppNotification = {
       id, userName, action, tipoLancamento,

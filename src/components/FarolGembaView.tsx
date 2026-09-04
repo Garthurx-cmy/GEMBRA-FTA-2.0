@@ -13,7 +13,8 @@ import {
   normalizeName,
   getSupervisorMetaMensal,
   getInspectionGrupoContrato,
-  isGestorRole
+  isGestorRole,
+  getMembrosFarol
 } from "../utils/operational";
 import { getTipoLancamento } from "../types";
 
@@ -194,30 +195,23 @@ export default function FarolGembaView({
     )
   ), [monthInspections, areas, contracts, supervisors]);
 
-  // Filter supervisors who participate in Farol GEMBA
-  const eligibleSupervisors = useMemo(() => {
-    return supervisors.filter(
-      (sup) => sup.ativo !== false && deveParticiparFarolGemba(sup)
-    );
-  }, [supervisors]);
-
   // Vale supervisors
   const valeRows = useMemo(() => {
-    const list = eligibleSupervisors.filter((s) => isSupervisorFromGrupoContrato(s, "vale"));
+    const list = getMembrosFarol(supervisors, "vale");
     const filteredList = selectedSupervisorId && selectedSupervisorId !== "all"
       ? list.filter((s) => s.id === selectedSupervisorId)
       : list;
     return processSupervisorRows(filteredList, valeMonthInspections);
-  }, [eligibleSupervisors, valeMonthInspections, selectedSupervisorId]);
+  }, [supervisors, valeMonthInspections, selectedSupervisorId]);
 
   // VLI supervisors
   const vliRows = useMemo(() => {
-    const list = eligibleSupervisors.filter((s) => isSupervisorFromGrupoContrato(s, "vli"));
+    const list = getMembrosFarol(supervisors, "vli");
     const filteredList = selectedSupervisorId && selectedSupervisorId !== "all"
       ? list.filter((s) => s.id === selectedSupervisorId)
       : list;
     return processSupervisorRows(filteredList, vliMonthInspections);
-  }, [eligibleSupervisors, vliMonthInspections, selectedSupervisorId]);
+  }, [supervisors, vliMonthInspections, selectedSupervisorId]);
 
   const renderTable = (rows: SupervisorRowData[], title: string, metaDescription: string, badgeColor: string) => {
     return (

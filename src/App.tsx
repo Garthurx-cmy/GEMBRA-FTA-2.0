@@ -16,7 +16,8 @@ const updateDoc = async (ref: any, data: any) => {
   return fbUpdateDoc(ref, data);
 };
 import { dbService, normalizeUserProfile, hasLegacyUppercaseFields } from "./services/db";
-import { buildUnifiedSupervisors, resolveSupervisorName } from "./utils/supervisors";
+import { buildUnifiedSupervisors, resolveSupervisorName, canLaunchInspection } from "./utils/supervisors";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import {
   Inspection,
   Supervisor,
@@ -447,6 +448,8 @@ export default function App() {
     refreshDatabaseStates();
   };
 
+  const [highlightedInspectionId, setHighlightedInspectionId] = useState<string | null>(null);
+
   // --- CORE WORKFLOW HANDLERS ---
 
   // Lançar / Editar Save
@@ -454,9 +457,10 @@ export default function App() {
     try {
       await dbService.saveInspection(inspection);
       refreshDatabaseStates();
+      setHighlightedInspectionId(inspection.id);
       triggerAlert(editingInspection ? "Inspeção atualizada com sucesso!" : "Nova inspeção GEMBA lançada com sucesso!");
     } catch (error: any) {
-      console.error(error);
+      console.error("[handleSaveInspection Error]:", error);
       triggerAlert(error?.message || "Não foi possível salvar a inspeção.", "error");
       throw error;
     }
@@ -1198,33 +1202,38 @@ export default function App() {
               />
             )}
 
-            {activeTab === "lancar" && currentUser?.perfil !== "visitante" && (
-              <LancarInspecaoView
-                supervisors={unifiedSupervisors}
-                areas={areas}
-                contracts={contracts}
-                config={config}
-                editingInspection={editingInspection}
-                onSave={handleSaveInspection}
-                onCancel={handleCancelForm}
-                currentUser={currentUser}
-              />
+            {activeTab === "lancar" && canLaunchInspection(currentUser) && (
+              <ErrorBoundary fallbackTitle="Erro ao carregar o formulário de inspeção">
+                <LancarInspecaoView
+                  supervisors={unifiedSupervisors}
+                  areas={areas}
+                  contracts={contracts}
+                  config={config}
+                  editingInspection={editingInspection}
+                  onSave={handleSaveInspection}
+                  onCancel={handleCancelForm}
+                  currentUser={currentUser}
+                />
+              </ErrorBoundary>
             )}
 
             {activeTab === "historico" && (
-              <HistoricoView
-                inspections={inspections}
-                supervisors={unifiedSupervisors}
-                areas={areas}
-                contracts={contracts}
-                selectedMonth={selectedMonth}
-                onSelectMonth={setSelectedMonth}
-                onEdit={handleEditInspectionInitiate}
-                onDelete={handleDeleteInspection}
-                onMarkAsDone={handleMarkAsDone}
-                onGeneratePDF={(inspection) => handleSelectInspectionReport(inspection.id)}
-                currentUser={currentUser}
-              />
+              <ErrorBoundary fallbackTitle="Erro ao carregar o histórico de inspeções">
+                <HistoricoView
+                  inspections={inspections}
+                  supervisors={unifiedSupervisors}
+                  areas={areas}
+                  contracts={contracts}
+                  selectedMonth={selectedMonth}
+                  onSelectMonth={setSelectedMonth}
+                  onEdit={handleEditInspectionInitiate}
+                  onDelete={handleDeleteInspection}
+                  onMarkAsDone={handleMarkAsDone}
+                  onGeneratePDF={(inspection) => handleSelectInspectionReport(inspection.id)}
+                  currentUser={currentUser}
+                  highlightedInspectionId={highlightedInspectionId}
+                />
+              </ErrorBoundary>
             )}
 
             {activeTab === "relatorios" && (

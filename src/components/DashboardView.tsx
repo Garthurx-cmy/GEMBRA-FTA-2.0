@@ -65,11 +65,12 @@ import FarolGembaView from "./FarolGembaView";
 import ResolvedImage from "./ResolvedImage";
 import {
   getInspectionScore,
-  deveParticiparFarolGemba,
   getInspectionGrupoContrato,
   isSupervisorFromGrupoContrato,
   getGrupoContratoPorLocalidade,
-  getSupervisorTargets
+  getSupervisorTargets,
+  getMembrosMetaDashboard,
+  getMembrosFarol
 } from "../utils/operational";
 import {
   getOperationalWeek,
@@ -210,7 +211,7 @@ export default function DashboardView({
   // --- FILTERED INSPECTIONS ---
   const filteredInspections = useMemo(() => {
     return inspections.filter((item) => {
-      if (getInspectionMonthKey(item) !== effectiveMonthKey) return false;
+      if (activeMonth !== "all_months" && getInspectionMonthKey(item) !== effectiveMonthKey) return false;
       // 1. Timeframe filter
       const itemDate = new Date(`${item.data}T00:00:00`);
       const today = normalizeInspectionDate(operationalToday);
@@ -273,7 +274,7 @@ export default function DashboardView({
 
       return true;
     });
-  }, [inspections, effectiveMonthKey, operationalToday, timeframe, activeOperationalWeek, startDate, endDate, selectedSupervisorId, selectedAreaId, selectedTipo, selectedPotencial, grupoContrato, areas, contracts, supervisors]);
+  }, [inspections, activeMonth, effectiveMonthKey, operationalToday, timeframe, activeOperationalWeek, startDate, endDate, selectedSupervisorId, selectedAreaId, selectedTipo, selectedPotencial, grupoContrato, areas, contracts, supervisors]);
 
   // Available supervisors based on selected contract group
   const availableSupervisors = useMemo(() => {
@@ -508,19 +509,13 @@ export default function DashboardView({
     const endOfMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0);
     endOfMonth.setHours(23, 59, 59, 999);
 
-    const activeSups = supervisors.filter((s) => {
-      if (s.ativo === false) return false;
-      if (grupoContrato === "vale") return isSupervisorFromGrupoContrato(s, "vale");
-      if (grupoContrato === "vli") return isSupervisorFromGrupoContrato(s, "vli");
-      return true;
-    });
-    const activeSupsForGoals = activeSups.filter(s => deveParticiparFarolGemba(s));
-    const selectedSupervisor = activeSups.find(s => s.id === selectedSupervisorId);
+    const membrosMetaDashboard = getMembrosMetaDashboard(supervisors, grupoContrato);
+    const selectedSupervisor = supervisors.find(s => s.id === selectedSupervisorId);
     const targetPerType = 7;
     const weeklyGoal = (sup?: Supervisor) => sup ? getSupervisorTargets(sup).weekly : 4;
     const monthlyGoal = (sup?: Supervisor) => sup ? getSupervisorTargets(sup).monthly : 16;
     const totalWeeklyTarget = selectedSupervisorId === "all"
-      ? Math.max(activeSupsForGoals.reduce((sum, sup) => sum + weeklyGoal(sup), 0), 1)
+      ? Math.max(membrosMetaDashboard.reduce((sum, sup) => sum + weeklyGoal(sup), 0), 1)
       : weeklyGoal(selectedSupervisor);
     const isQuantitativeGoal = selectedSupervisorId !== "all" && selectedSupervisor?.tipoMeta === "quantitativa";
 
@@ -561,7 +556,7 @@ export default function DashboardView({
 
     const typeBasedWeeklyAchieved = dssCapped + arCapped + lvccCapped + dialCapped + comportamentalCapped + estruturalCapped + notificacaoCapped + interdicaoCapped;
     const totalWeeklyAchieved = selectedSupervisorId === "all"
-      ? activeSupsForGoals.reduce((sum, sup) => {
+      ? membrosMetaDashboard.reduce((sum, sup) => {
           const count = weekInspections.filter(i => inspectionBelongsToSupervisor(i, sup, supervisors)).length;
           if (sup.tipoMeta === "quantitativa") return sum + Math.min(count, weeklyGoal(sup));
           const achievedTypes = new Set(
@@ -578,10 +573,12 @@ export default function DashboardView({
     const weeklyPercentage = Math.min(100, Math.round((totalWeeklyAchieved / totalWeeklyTarget) * 100));
 
     // Monthly progress
-    const goalSupervisors = selectedSupervisorId === "all" ? activeSupsForGoals : selectedSupervisor ? [selectedSupervisor] : [];
-    const monthlyTotalCount = monthInspections.filter(i => goalSupervisors.some(sup => inspectionBelongsToSupervisor(i, sup, supervisors))).length;
+    const goalSupervisors = selectedSupervisorId === "all" ? membrosMetaDashboard : selectedSupervisor ? [selectedSupervisor] : [];
+    const monthlyTotalCount = selectedSupervisorId === "all"
+      ? monthInspections.length
+      : monthInspections.filter(i => selectedSupervisor ? inspectionBelongsToSupervisor(i, selectedSupervisor, supervisors, dbService.getDeletedNames()) : false).length;
     const monthlyTarget = selectedSupervisorId === "all"
-      ? activeSupsForGoals.reduce((sum, sup) => sum + monthlyGoal(sup), 0)
+      ? membrosMetaDashboard.reduce((sum, sup) => sum + monthlyGoal(sup), 0)
       : monthlyGoal(selectedSupervisor);
     const monthlyPercentage = monthlyTarget > 0 ? Math.min(100, Math.round((monthlyTotalCount / monthlyTarget) * 100)) : 0;
 
@@ -611,7 +608,7 @@ export default function DashboardView({
 
     // 2. Specific supervisor checks
     const supsToCheck = selectedSupervisorId === "all" 
-      ? activeSupsForGoals 
+      ? membrosMetaDashboard 
       : supervisors.filter((s) => s.id === selectedSupervisorId);
 
     supsToCheck.forEach((sup) => {
@@ -753,9 +750,7 @@ export default function DashboardView({
 
   const contractGoalSummaries = useMemo(() => {
     const build = (group: GrupoContrato) => {
-      const groupSupervisors = supervisors.filter(
-        (sup) => sup.ativo !== false && deveParticiparFarolGemba(sup) && isSupervisorFromGrupoContrato(sup, group)
-      );
+      const groupSupervisors = getMembrosMetaDashboard(supervisors, group);
       const groupWeek = weeklyInspections.filter(
         (insp) => getInspectionGrupoContrato(insp, areas, contracts, supervisors, dbService.getDeletedNames()) === group
       );
@@ -819,7 +814,9 @@ export default function DashboardView({
       return maxTime;
     };
 
-    return supervisors
+    const sups = getMembrosMetaDashboard(supervisors, grupoContrato);
+
+    return sups
       .map((sup) => {
         const supWeekInsps = weeklyInspections.filter((i) => inspectionBelongsToSupervisor(i, sup, supervisors));
 
@@ -2736,11 +2733,11 @@ export default function DashboardView({
                       <div className="flex gap-1.5 items-center">
                         <span
                           className={`px-2 py-0.5 rounded-full text-[8px] font-black uppercase tracking-wider ${
-                            insp.potencial === "CRÍTICO"
+                            insp.potencial === Potential.CRITICO
                               ? "bg-red-50 text-red-700 border border-red-100"
-                              : insp.potencial === "ALTO"
+                              : insp.potencial === Potential.GRAVE
                               ? "bg-orange-50 text-orange-700 border border-orange-100"
-                              : insp.potencial === "MÉDIO"
+                              : insp.potencial === Potential.MEDIO
                               ? "bg-yellow-50 text-yellow-700 border border-yellow-100"
                               : "bg-green-50 text-green-700 border border-green-100"
                           }`}
@@ -2750,9 +2747,9 @@ export default function DashboardView({
 
                         <span
                           className={`px-2 py-0.5 rounded-full text-[8px] font-black uppercase tracking-wider ${
-                            insp.status === "CONCLUÍDO"
+                            insp.status === InspectionStatus.CONCLUIDO
                               ? "bg-green-100 text-green-800"
-                              : insp.status === "EM ANDAMENTO"
+                              : insp.status === InspectionStatus.EM_ANDAMENTO
                               ? "bg-yellow-100 text-yellow-800"
                               : "bg-red-100 text-red-800"
                           }`}

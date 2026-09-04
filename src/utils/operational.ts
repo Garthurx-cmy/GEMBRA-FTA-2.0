@@ -1,7 +1,10 @@
 import { Area, Contract, GrupoContrato, GrupoContratoFiltro, Inspection, Supervisor } from "../types";
 import { getSingleInspectionScore } from "./scoring";
+import { getNormalizedInspectionDate } from "./inspectionUtils";
 
 export type ContractGroupFilter = "Todos" | "Vale" | "VLI";
+
+export const INICIO_OPERACAO_VALE = "2026-09-01";
 
 export const normalizeName = (value = "") =>
   value
@@ -41,6 +44,79 @@ export function isGestorRole(cargo?: string | null, perfil?: string | null): boo
     norm.includes("administrador") ||
     norm.includes("desenvolvedor")
   );
+}
+
+/**
+ * Determina se o responsável é um Supervisor ou Gestor operacional
+ * que compõe o cálculo da meta da equipe no Dashboard.
+ *
+ * Regras:
+ * 1. Ativo (ativo !== false).
+ * 2. Líderes de Equipe não entram na meta dos supervisores.
+ * 3. Administradores e Desenvolvedores puros / Visitantes não compõem meta operacional.
+ * 4. Não utiliza participaFarolGemba (participaFarolGemba é exclusivo do Farol).
+ */
+export function isSupervisorOrGestorMeta(supervisor?: Partial<Supervisor> | null): boolean {
+  if (!supervisor || supervisor.ativo === false) return false;
+
+  // 1. Líder de Equipe não entra na meta dos supervisores
+  if (isLeaderRole(supervisor.cargo, supervisor.perfil)) {
+    return false;
+  }
+
+  const cargoNorm = normalizeName(supervisor.cargo || "");
+  const perfilNorm = normalizeName(supervisor.perfil || "");
+
+  // 2. Administradores e Desenvolvedores puros / Visitantes
+  const isPureAdminOrDev =
+    perfilNorm.includes("desenvolvedor") ||
+    perfilNorm === "administrador" ||
+    perfilNorm === "admin" ||
+    perfilNorm === "visitante";
+
+  const hasOperationalCargo =
+    cargoNorm.includes("supervisor") ||
+    cargoNorm.includes("gestor") ||
+    cargoNorm.includes("gerente") ||
+    cargoNorm.includes("coordenador") ||
+    cargoNorm.includes("encarregado");
+
+  if (isPureAdminOrDev && !hasOperationalCargo) {
+    return false;
+  }
+
+  return true;
+}
+
+/**
+ * Retorna os membros que compõem a meta do Dashboard (Supervisor e Gestor operacionais).
+ * Independentemente de participaFarolGemba.
+ */
+export function getMembrosMetaDashboard(
+  supervisors: Supervisor[] = [],
+  grupo?: GrupoContratoFiltro | GrupoContrato
+): Supervisor[] {
+  return supervisors.filter((s) => {
+    if (!isSupervisorOrGestorMeta(s)) return false;
+    if (grupo === "vale") return isSupervisorFromGrupoContrato(s, "vale");
+    if (grupo === "vli") return isSupervisorFromGrupoContrato(s, "vli");
+    return true;
+  });
+}
+
+/**
+ * Retorna os membros participantes do Farol GEMBA (apenas elegíveis com participaFarolGemba !== false).
+ */
+export function getMembrosFarol(
+  supervisors: Supervisor[] = [],
+  grupo?: GrupoContratoFiltro | GrupoContrato
+): Supervisor[] {
+  return supervisors.filter((s) => {
+    if (!isSupervisorOrGestorMeta(s) || !deveParticiparFarolGemba(s)) return false;
+    if (grupo === "vale") return isSupervisorFromGrupoContrato(s, "vale");
+    if (grupo === "vli") return isSupervisorFromGrupoContrato(s, "vli");
+    return true;
+  });
 }
 
 /**
@@ -119,6 +195,17 @@ export function getInspectionGrupoContrato(
 ): GrupoContrato | "nao_classificado" {
   if (!inspection) return "nao_classificado";
 
+  // 1. Obter a data exclusivamente pelo campo operacional data.
+  const dataOperacional = getNormalizedInspectionDate(inspection);
+
+  // 2. Se a data for válida e menor que 2026-09-01, retornar imediatamente "vli".
+  // Toda inspeção com data operacional anterior a 01/09/2026 pertence à VLI.
+  // Vale não possuía inspeções históricas em julho ou agosto.
+  if (dataOperacional && dataOperacional < INICIO_OPERACAO_VALE) {
+    return "vli";
+  }
+
+  // Somente para datas iguais ou posteriores a 2026-09-01 (ou fallback sem data):
   // 1. areaId encontrado no diretório de áreas
   if (inspection.areaId) {
     const area = areas.find(a => a.id === inspection.areaId);
@@ -171,8 +258,11 @@ export function getInspectionGrupoContrato(
   }
 
   // 7. grupoContrato canônico já existente
-  // O contrato de uma inspeção nunca é inferido pelo supervisor.
+  // Não confiar em grupoContrato = vale em documento anterior a setembro
   if (inspection.grupoContrato === "vli" || inspection.grupoContrato === "vale") {
+    if (inspection.grupoContrato === "vale" && dataOperacional && dataOperacional < INICIO_OPERACAO_VALE) {
+      return "vli";
+    }
     return inspection.grupoContrato;
   }
 
@@ -312,3 +402,9 @@ export function getSupervisorMetaMensal(sup: Supervisor): number {
   if (sup.metaMensal !== undefined) return sup.metaMensal;
   return getSupervisorTargets(sup).monthly;
 }
+
+/**
+ * Alias para isSupervisorOrGestorMeta
+ */
+export const isOperationalGoalMember = isSupervisorOrGestorMeta;
+

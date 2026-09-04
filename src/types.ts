@@ -34,6 +34,9 @@ export interface Inspection {
   atividade: string;
   tipo: string;
   tipoLancamento?: string;
+  areaNome?: string;
+  contratoNome?: string;
+  createdBy?: string;
   criadoPorUid?: string;
   criadoPorNome?: string;
   criadoPorEmail?: string;
@@ -58,10 +61,14 @@ export interface Inspection {
 
 export interface InspectionDraft {
   id?: string;
+  pendingDocumentId?: string;
   data: string;
   supervisorId: string;
+  supervisorNome?: string;
   areaId: string;
+  areaNome?: string;
   contratoId: string;
+  contratoNome?: string;
   grupoContrato?: GrupoContrato;
   tipoLancamento: string;
   tipo?: string;

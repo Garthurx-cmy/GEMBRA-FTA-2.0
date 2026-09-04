@@ -42,7 +42,7 @@ function readLocal(key: string): any {
 }
 
 /** Synchronous local copy protects a last keystroke during pagehide; IndexedDB keeps photos. */
-export function saveInspectionDraft(userId: string, draft: InspectionDraft, editId?: string): Promise<void> {
+export function saveInspectionDraft(userId: string, draft: Partial<InspectionDraft>, editId?: string): Promise<void> {
   const key = draftKey(userId, editId);
   const record = { draftKey: key, userId, isEditingId: editId || null, draft: { ...draft, savedAt: new Date().toISOString() } };
   let localSaved = false;
@@ -53,7 +53,7 @@ export function saveInspectionDraft(userId: string, draft: InspectionDraft, edit
   });
 }
 
-export async function getInspectionDraft(userId: string, editId?: string): Promise<InspectionDraft | null> {
+export async function getInspectionDraft(userId: string, editId?: string): Promise<Partial<InspectionDraft> | null> {
   const keys = [...new Set([draftKey(userId, editId), legacyKey(userId, editId)])];
   const candidates: InspectionDraft[] = [];
   for (const key of keys) {

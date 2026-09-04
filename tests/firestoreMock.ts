@@ -4,7 +4,14 @@ export class Sentinel { toDate() { return new Date(); } }
 export const serverTimestamp = () => new Sentinel();
 export const deleteField = () => new Sentinel();
 export const collection = (_db: any, ...parts: string[]) => ({ path: parts.join("/") });
-export const doc = (_db: any, ...parts: string[]) => ({ path: parts.join("/") });
+export const doc = (_db: any, ...parts: string[]) => {
+  if (parts.length === 0 && _db && _db.path) {
+    const id = `auto_${Math.random().toString(36).substring(2, 10)}`;
+    return { id, path: `${_db.path}/${id}` };
+  }
+  const id = parts.at(-1) || `auto_${Math.random().toString(36).substring(2, 10)}`;
+  return { id, path: parts.join("/") };
+};
 export const query = (ref: any, ...constraints: any[]) => ({ ...ref, constraints });
 export const where = (...args: any[]) => ({ kind: "where", args });
 export const limit = (value: number) => ({ kind: "limit", value });

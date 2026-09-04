@@ -8,6 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
+    "test": "node tests/run.mjs",
     "lint": "tsc --noEmit"
   },
   "dependencies": {
@@ -30,6 +31,8 @@
   "devDependencies": {
     "@types/express": "^4.17.21",
     "@types/node": "^22.14.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.7",
     "autoprefixer": "^10.4.21",
     "esbuild": "^0.25.0",
     "firebase-admin": "^14.1.0",

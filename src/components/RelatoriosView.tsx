@@ -964,7 +964,7 @@ export default function RelatoriosView({
                   <div className="flex justify-between items-center w-full">
                     <span className="font-bold text-[#0B2E59]">{item.id.toUpperCase()}</span>
                     <span className="text-[10px] text-gray-400 font-semibold">
-                      {item.data.split("-").reverse().join("/")}
+                      {getNormalizedInspectionDate(item) ? getNormalizedInspectionDate(item)!.split("-").reverse().join("/") : (item.data || "-")}
                     </span>
                   </div>
                   <span className="text-gray-800 font-semibold truncate w-full">

@@ -35,7 +35,8 @@ import {
   X,
   UploadCloud,
   History,
-  Trash2
+  Trash2,
+  RefreshCw
 } from "lucide-react";
 import { convertHeicFileToJpegDataUrl } from "../utils/heicHelper";
 import {
@@ -43,6 +44,8 @@ import {
   getInspectionDraft,
   deleteInspectionDraft
 } from "../utils/draftStorage";
+import { dbService } from "../services/db";
+import { normalizeText } from "../utils/supervisors";
 
 
 interface LancarInspecaoViewProps {
@@ -149,17 +152,21 @@ export default function LancarInspecaoView({
   const [fotosDepois, setFotosDepois] = useState<string[]>([]);
 
   // Validation alerts and processing states
+  type SubmitState = "idle" | "validating" | "saving" | "saved" | "error";
   const [error, setError] = useState("");
   const [isSaving, setIsSaving] = useState(false);
+  const [submitState, setSubmitState] = useState<SubmitState>("idle");
   const [compressingStatus, setCompressingStatus] = useState("");
   const [draftRestored, setDraftRestored] = useState(false);
   const [lastSavedDraftTime, setLastSavedDraftTime] = useState<string | null>(null);
 
   const draftRef = useRef<InspectionDraft | null>(null);
   const suppressed = useRef(false);
+  const submissionSucceededRef = useRef(false);
   const submitLock = useRef(false);
   const recordId = useRef("");
   const mounted = useRef(false);
+  const autosaveTimerRef = useRef<number | null>(null);
   const [readyScope, setReadyScope] = useState("");
   const [resetVersion, setResetVersion] = useState(0);
   const [draftError, setDraftError] = useState("");
@@ -172,13 +179,14 @@ export default function LancarInspecaoView({
     let cancelled = false;
     setReadyScope("");
     suppressed.current = false;
+    submissionSucceededRef.current = false;
     getInspectionDraft(userId, editId).then(draft => {
       if (cancelled) return;
       const currentSupervisor = supervisors.find(s => supervisorMatchesId(s, currentUser?.id) ||
         (s.email && currentUser?.email && s.email.toLowerCase() === currentUser.email.toLowerCase()));
       const original = editingInspection;
       const source = draft || original;
-      recordId.current = original?.id || draft?.id || `insp_${crypto.randomUUID()}`;
+      recordId.current = original?.id || draft?.pendingDocumentId || draft?.id || dbService.createPendingInspectionId();
       setData(getNormalizedInspectionDate(source?.data) || getOperationalDateKey());
       setSupervisorId(source?.supervisorId || currentSupervisor?.id || (isOperationalRole(currentUser?.perfil) ? userId : ""));
       setAreaId(source?.areaId || areas[0]?.id || "");
@@ -201,40 +209,100 @@ export default function LancarInspecaoView({
   }, [scope]);
 
   if (readyScope === scope) {
+    const currentSupName = supervisors.find(s => supervisorMatchesId(s, supervisorId))?.nome;
+    const currentAreaName = areas.find(a => a.id === areaId)?.nome;
+    const currentContrato = contracts.find(c => c.id === contratoId);
+    const currentContratoNome = currentContrato?.nome || (currentContrato?.codigo ? `${currentContrato.codigo}` : undefined);
     draftRef.current = {
-      id: recordId.current, data, supervisorId, areaId, contratoId,
+      id: recordId.current,
+      pendingDocumentId: recordId.current,
+      data,
+      supervisorId,
+      supervisorNome: currentSupName,
+      areaId,
+      areaNome: currentAreaName,
+      contratoId,
+      contratoNome: currentContratoNome,
       grupoContrato: getGrupoContratoPorLocalidade(areaId, areas, contracts),
-      atividade, tipo, tipoLancamento: getTipoLancamento(atividade, tipo), potencial,
-      descricao, acaoCorretiva, responsavel, prazo, status, observacoes, fotosAntes, fotosDepois,
-      temaDSS, quantidadeParticipantes, dataConclusao, scrollTop: draftRef.current?.scrollTop || 0
+      atividade,
+      tipo,
+      tipoLancamento: getTipoLancamento(atividade, tipo),
+      potencial,
+      descricao,
+      acaoCorretiva,
+      responsavel,
+      prazo,
+      status,
+      observacoes,
+      fotosAntes,
+      fotosDepois,
+      temaDSS,
+      quantidadeParticipantes,
+      dataConclusao,
+      scrollTop: draftRef.current?.scrollTop || 0
     };
   }
   const persistDraft = () => {
-    if (suppressed.current || readyScope !== scope || !draftRef.current) return;
+    if (submissionSucceededRef.current || suppressed.current || readyScope !== scope || !draftRef.current) return;
     void saveInspectionDraft(userId, draftRef.current, editId).then(() => {
-      if (mounted.current) { setDraftError(""); setLastSavedDraftTime(new Date().toLocaleTimeString("pt-BR")); }
-    }).catch(() => { if (mounted.current) setDraftError("Não foi possível salvar o rascunho neste dispositivo. Mantenha esta tela aberta."); });
+      if (mounted.current && !submissionSucceededRef.current) {
+        setDraftError("");
+        setLastSavedDraftTime(new Date().toLocaleTimeString("pt-BR"));
+      }
+    }).catch(() => {
+      if (mounted.current && !submissionSucceededRef.current) {
+        setDraftError("Não foi possível salvar o rascunho neste dispositivo. Mantenha esta tela aberta.");
+      }
+    });
   };
   const persistRef = useRef(persistDraft);
   persistRef.current = persistDraft;
+
   useEffect(() => {
-    if (readyScope !== scope || suppressed.current) return;
-    const timer = window.setTimeout(() => persistRef.current(), 350);
-    return () => clearTimeout(timer);
-  }, [readyScope, scope, data, supervisorId, areaId, contratoId, atividade, tipo, potencial,
+    if (submissionSucceededRef.current || readyScope !== scope || suppressed.current) return;
+    if (autosaveTimerRef.current) {
+      window.clearTimeout(autosaveTimerRef.current);
+    }
+    autosaveTimerRef.current = window.setTimeout(() => {
+      if (!submissionSucceededRef.current && !suppressed.current) {
+        persistRef.current();
+      }
+    }, 400);
+    return () => {
+      if (autosaveTimerRef.current) {
+        window.clearTimeout(autosaveTimerRef.current);
+        autosaveTimerRef.current = null;
+      }
+    };
+  }, [
+    readyScope, scope, data, supervisorId, areaId, contratoId, atividade, tipo, potencial,
     descricao, acaoCorretiva, responsavel, prazo, status, observacoes, fotosAntes, fotosDepois,
-    temaDSS, quantidadeParticipantes, dataConclusao]);
+    temaDSS, quantidadeParticipantes, dataConclusao
+  ]);
+
   useEffect(() => {
     mounted.current = true;
-    const flush = () => persistRef.current();
-    const hide = () => { if (document.visibilityState === "hidden") flush(); };
+    submissionSucceededRef.current = false;
+    const flush = () => {
+      if (!submissionSucceededRef.current && !suppressed.current) {
+        persistRef.current();
+      }
+    };
+    const hide = () => {
+      if (document.visibilityState === "hidden") flush();
+    };
     const main = document.querySelector("main");
-    const scroll = () => { if (draftRef.current) draftRef.current.scrollTop = main?.scrollTop || 0; };
-    window.addEventListener("pagehide", flush); document.addEventListener("visibilitychange", hide);
+    const scroll = () => {
+      if (draftRef.current) draftRef.current.scrollTop = main?.scrollTop || 0;
+    };
+    window.addEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", hide);
     main?.addEventListener("scroll", scroll, { passive: true });
     return () => {
-      mounted.current = false; flush();
-      window.removeEventListener("pagehide", flush); document.removeEventListener("visibilitychange", hide);
+      mounted.current = false;
+      flush();
+      window.removeEventListener("pagehide", flush);
+      document.removeEventListener("visibilitychange", hide);
       main?.removeEventListener("scroll", scroll);
     };
   }, []);
@@ -243,10 +311,20 @@ export default function LancarInspecaoView({
     if (!window.confirm("Descartar o preenchimento deste formulário? A inspeção gravada no banco não será apagada.")) return;
     suppressed.current = true;
     try {
+      if (autosaveTimerRef.current) {
+        window.clearTimeout(autosaveTimerRef.current);
+        autosaveTimerRef.current = null;
+      }
       await deleteInspectionDraft(userId, editId);
-      draftRef.current = null; setLastSavedDraftTime(null); setDraftRestored(false);
+      draftRef.current = null;
+      setLastSavedDraftTime(null);
+      setDraftRestored(false);
+      recordId.current = dbService.createPendingInspectionId();
       setResetVersion(value => value + 1);
-    } catch { suppressed.current = false; setDraftError("Não foi possível descartar o rascunho."); }
+    } catch {
+      suppressed.current = false;
+      setDraftError("Não foi possível descartar o rascunho.");
+    }
   };
 
   // Resolve matching label for select element
@@ -334,126 +412,195 @@ export default function LancarInspecaoView({
   // Save/Submit Form handler
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (submitLock.current || readyScope !== scope) return;
-    setError("");
-
-    const currentLaunchType = getSelectedValue();
-    const isDSS = currentLaunchType === "DSS";
-    const isPresenca = currentLaunchType === "Presença em Campo";
-
-    // Validations
-    if (!data) return setError("Por favor, preencha a data.");
-    if (!supervisorId) return setError("Selecione o supervisor responsável.");
-    if (!areaId) return setError("Selecione a área operacional.");
-    if (!contratoId) return setError("Selecione o contrato associado.");
-
-    if (isPresenca) {
-      if (quantidadeParticipantes === "" || Number(quantidadeParticipantes) <= 0) {
-        return setError("Por favor, insira a quantidade de participantes abordados (maior que zero).");
-      }
-      if (!descricao.trim()) return setError("Por favor, forneça uma descrição detalhada da Presença em Campo.");
-    } else if (isDSS) {
-      if (!temaDSS.trim()) return setError("Por favor, preencha o Tema do DSS.");
-      if (quantidadeParticipantes === "" || Number(quantidadeParticipantes) <= 0) {
-        return setError("Por favor, insira a quantidade de participantes (maior que zero).");
-      }
-      if (!descricao.trim()) return setError("Por favor, forneça uma descrição detalhada do DSS.");
-    } else {
-      if (!descricao.trim()) return setError("Por favor, forneça uma descrição detalhada do desvio.");
-      if (!acaoCorretiva.trim()) return setError("Por favor, defina a ação corretiva recomendada/realizada.");
-      if (!responsavel.trim()) return setError("Identifique o colaborador responsável pela ação.");
-      if (status === InspectionStatus.CONCLUIDO) {
-        if (!dataConclusao) return setError("A data de conclusão é obrigatória para concluir a inspeção.");
-      } else {
-        if (!prazo) return setError("Defina o prazo limite para a conclusão da tratativa.");
-      }
-    }
-
-    // Validate total photo sizes (maximum of 650 KB)
-    const totalPhotosSize = [...fotosAntes, ...fotosDepois].reduce((sum, img) => sum + getBase64Size(img), 0);
-    const maxPhotosSizeBytes = 650 * 1024;
-    if (totalPhotosSize > maxPhotosSizeBytes) {
-      return setError(`O tamanho total das fotos (${(totalPhotosSize / 1024).toFixed(1)} KB) excede o limite máximo permitido de 650 KB por inspeção. Por favor, remova alguma foto.`);
-    }
-
-    // Authorship fields: preserve on edit, populate on new
-    const uid = editingInspection ? editingInspection.criadoPorUid : (currentUser?.id || auth?.currentUser?.uid || "");
-    const nome = editingInspection ? editingInspection.criadoPorNome : (currentUser?.nome || auth?.currentUser?.displayName || "Usuário");
-    const email = editingInspection ? editingInspection.criadoPorEmail : (currentUser?.email || auth?.currentUser?.email || "");
-
-    const selectedSupervisor = supervisors.find(s => supervisorMatchesId(s, supervisorId));
-    const selectedArea = areas.find((area) => area.id === areaId);
-    const canonicalGroup = getGrupoContratoPorLocalidade(selectedArea || areaId, areas, contracts);
-    if (!canonicalGroup) {
-      return setError("Não foi possível identificar se a área selecionada pertence à Vale ou à VLI. Atualize o cadastro da localidade antes de salvar.");
-    }
-    const selectedContract = contracts.find((contract) => contract.id === contratoId);
-    if (
-      selectedContract?.grupoContrato &&
-      selectedContract.grupoContrato !== canonicalGroup
-    ) {
-      return setError("A área e o contrato selecionados pertencem a grupos diferentes. Corrija a seleção antes de salvar.");
-    }
-
-    const finalInspection: Inspection = {
-      ...editingInspection,
-      id: editingInspection?.id || recordId.current,
-      data: editingInspection && data === getNormalizedInspectionDate(editingInspection.data) ? editingInspection.data : data,
-      supervisorNome: selectedSupervisor?.nome || editingInspection?.supervisorNome,
-      supervisorEmail: selectedSupervisor?.email || editingInspection?.supervisorEmail,
-      supervisorId,
-      areaId,
-      contratoId,
-      grupoContrato: canonicalGroup,
-      tipoLancamento: currentLaunchType,
-      tipo: currentLaunchType,
-      atividade: currentLaunchType,
-      criadoPorUid: uid,
-      criadoPorNome: nome,
-      criadoPorEmail: email,
-      potencial: (isDSS || isPresenca) ? Potential.LEVE : potencial,
-      descricao,
-      acaoCorretiva: isPresenca ? "Presença em campo registrada" : (isDSS ? "Realizado DSS em campo" : acaoCorretiva),
-      responsavel: (isDSS || isPresenca) ? (selectedSupervisor?.nome || editingInspection?.supervisorNome || "Supervisor") : responsavel,
-      prazo: (isDSS || isPresenca) ? data : prazo,
-      status: (isDSS || isPresenca) ? InspectionStatus.CONCLUIDO : status,
-      observacoes: observacoes || null,
-      fotosAntes,
-      fotosDepois: (isDSS || isPresenca) ? [] : fotosDepois,
-      rotacoesFotosAntes: editingInspection?.rotacoesFotosAntes || [],
-      rotacoesFotosDepois: editingInspection?.rotacoesFotosDepois || [],
-      armazenamentoFotos: "firestore-inline",
-      temaDSS: isDSS ? temaDSS : null,
-      quantidadeParticipantes: (isDSS || isPresenca) ? Number(quantidadeParticipantes) : null,
-      dataConclusao: (!isDSS && !isPresenca && status === InspectionStatus.CONCLUIDO) ? dataConclusao : null,
-      createdAt: editingInspection?.createdAt || new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    };
-
-    // Validate that the document size never exceeds 1 MiB of Firestore limit
-    const serializedDoc = JSON.stringify(finalInspection);
-    const docSizeBytes = new TextEncoder().encode(serializedDoc).byteLength;
-    const oneMiB = 1024 * 1024;
-    if (docSizeBytes > oneMiB) {
-      return setError("As fotos ultrapassaram o limite permitido. Remova uma foto ou escolha imagens menores.");
+    if (submitLock.current || submitState === "saving" || submitState === "validating" || readyScope !== scope) {
+      console.warn("[Envio Inspeção] Tentativa ignorada: envio já em andamento.");
+      return;
     }
 
     submitLock.current = true;
     setIsSaving(true);
-    persistRef.current();
+    setSubmitState("validating");
+    setError("");
+
     try {
+      // 1. iniciarEnvio()
+      const authUid = currentUser?.id || auth?.currentUser?.uid || "";
+      const perfilNormalizado = currentUser?.perfil ? normalizeText(currentUser.perfil) : "desconhecido";
+      const grupoPermitido = (currentUser?.gruposContratoPermitidos || ["vli"]).join(", ");
+
+      console.log("[Envio Inspeção] Etapa: iniciarEnvio", {
+        uid: authUid,
+        perfilNormalizado,
+        grupoContratoPermitido: grupoPermitido,
+        banco: "ai-studio-gembafta-570b0537-aea6-4a55-ac2a-d81d9f8cc2d0",
+        documentIdPlanejado: recordId.current
+      });
+
+      const currentLaunchType = getSelectedValue();
+      const isDSS = currentLaunchType === "DSS";
+      const isPresenca = currentLaunchType === "Presença em Campo";
+
+      // 2. validarFormulario()
+      if (!data) throw new Error("Por favor, preencha a data.");
+      if (!supervisorId) throw new Error("Selecione o supervisor responsável.");
+      if (!areaId) throw new Error("Selecione a área operacional.");
+      if (!contratoId) throw new Error("Selecione o contrato associado.");
+
+      if (isPresenca) {
+        if (quantidadeParticipantes === "" || Number(quantidadeParticipantes) <= 0) {
+          throw new Error("Por favor, insira a quantidade de participantes abordados (maior que zero).");
+        }
+        if (!descricao.trim()) throw new Error("Por favor, forneça uma descrição detalhada da Presença em Campo.");
+      } else if (isDSS) {
+        if (!temaDSS.trim()) throw new Error("Por favor, preencha o Tema do DSS.");
+        if (quantidadeParticipantes === "" || Number(quantidadeParticipantes) <= 0) {
+          throw new Error("Por favor, insira a quantidade de participantes (maior que zero).");
+        }
+        if (!descricao.trim()) throw new Error("Por favor, forneça uma descrição detalhada do DSS.");
+      } else {
+        if (!descricao.trim()) throw new Error("Por favor, forneça uma descrição detalhada do desvio.");
+        if (!acaoCorretiva.trim()) throw new Error("Por favor, defina a ação corretiva recomendada/realizada.");
+        if (!responsavel.trim()) throw new Error("Identifique o colaborador responsável pela ação.");
+        if (status === InspectionStatus.CONCLUIDO) {
+          if (!dataConclusao) throw new Error("A data de conclusão é obrigatória para concluir a inspeção.");
+        } else {
+          if (!prazo) throw new Error("Defina o prazo limite para a conclusão da tratativa.");
+        }
+      }
+
+      // Validate total photo sizes (maximum of 650 KB)
+      const totalPhotosSize = [...fotosAntes, ...fotosDepois].reduce((sum, img) => sum + getBase64Size(img), 0);
+      const maxPhotosSizeBytes = 650 * 1024;
+      if (totalPhotosSize > maxPhotosSizeBytes) {
+        throw new Error(`O tamanho total das fotos (${(totalPhotosSize / 1024).toFixed(1)} KB) excede o limite máximo permitido de 650 KB por inspeção. Por favor, remova alguma foto.`);
+      }
+
+      const selectedSupervisor = supervisors.find(s => supervisorMatchesId(s, supervisorId));
+      const selectedArea = areas.find((area) => area.id === areaId);
+      const canonicalGroup = getGrupoContratoPorLocalidade(selectedArea || areaId, areas, contracts);
+      if (!canonicalGroup) {
+        throw new Error("Não foi possível identificar se a área selecionada pertence à Vale ou à VLI. Atualize o cadastro da localidade antes de salvar.");
+      }
+      const selectedContract = contracts.find((contract) => contract.id === contratoId);
+      if (
+        selectedContract?.grupoContrato &&
+        selectedContract.grupoContrato !== canonicalGroup
+      ) {
+        throw new Error("A área e o contrato selecionados pertencem a grupos diferentes. Corrija a seleção antes de salvar.");
+      }
+
+      // 3. montarPayloadSeguro()
+      const uid = editingInspection ? (editingInspection.criadoPorUid || editingInspection.createdBy) : authUid;
+      const nome = editingInspection ? editingInspection.criadoPorNome : (currentUser?.nome || auth?.currentUser?.displayName || "Usuário");
+      const email = editingInspection ? editingInspection.criadoPorEmail : (currentUser?.email || auth?.currentUser?.email || "");
+
+      const finalInspection: Inspection = {
+        ...editingInspection,
+        id: editingInspection?.id || recordId.current,
+        data: editingInspection && data === getNormalizedInspectionDate(editingInspection.data) ? editingInspection.data : data,
+        supervisorNome: selectedSupervisor?.nome || editingInspection?.supervisorNome,
+        supervisorEmail: selectedSupervisor?.email || editingInspection?.supervisorEmail,
+        supervisorId,
+        areaId,
+        areaNome: selectedArea?.nome || (editingInspection as any)?.areaNome,
+        contratoId,
+        contratoNome: selectedContract?.nome || (selectedContract?.codigo ? `${selectedContract.codigo}` : (editingInspection as any)?.contratoNome),
+        grupoContrato: canonicalGroup,
+        tipoLancamento: currentLaunchType,
+        tipo: currentLaunchType,
+        atividade: currentLaunchType,
+        createdBy: uid,
+        criadoPorUid: uid,
+        criadoPorNome: nome,
+        criadoPorEmail: email,
+        potencial: (isDSS || isPresenca) ? Potential.LEVE : potencial,
+        descricao,
+        acaoCorretiva: isPresenca ? "Presença em campo registrada" : (isDSS ? "Realizado DSS em campo" : acaoCorretiva),
+        responsavel: (isDSS || isPresenca) ? (selectedSupervisor?.nome || editingInspection?.supervisorNome || "Supervisor") : responsavel,
+        prazo: (isDSS || isPresenca) ? data : prazo,
+        status: (isDSS || isPresenca) ? InspectionStatus.CONCLUIDO : status,
+        observacoes: observacoes || null,
+        fotosAntes,
+        fotosDepois: (isDSS || isPresenca) ? [] : fotosDepois,
+        rotacoesFotosAntes: editingInspection?.rotacoesFotosAntes || [],
+        rotacoesFotosDepois: editingInspection?.rotacoesFotosDepois || [],
+        armazenamentoFotos: "firestore-inline",
+        temaDSS: isDSS ? temaDSS : null,
+        quantidadeParticipantes: (isDSS || isPresenca) ? Number(quantidadeParticipantes) : null,
+        dataConclusao: (!isDSS && !isPresenca && status === InspectionStatus.CONCLUIDO) ? dataConclusao : null,
+        createdAt: editingInspection?.createdAt || new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+
+      // Validate Firestore 1 MiB limit
+      const serializedDoc = JSON.stringify(finalInspection);
+      const docSizeBytes = new TextEncoder().encode(serializedDoc).byteLength;
+      const oneMiB = 1024 * 1024;
+      if (docSizeBytes > oneMiB) {
+        throw new Error("As fotos ultrapassaram o limite permitido. Remova uma foto ou escolha imagens menores.");
+      }
+
+      // 4. salvarInspecaoPrincipal() e 5. confirmarDocumento()
+      setSubmitState("saving");
+      console.log("[Envio Inspeção] Etapa: salvarInspecaoPrincipal", {
+        documentId: finalInspection.id,
+        grupoContrato: finalInspection.grupoContrato
+      });
+
       await onSave(finalInspection);
+
+      console.log("[Envio Inspeção] Etapa: confirmarDocumento - Sucesso", {
+        documentId: finalInspection.id
+      });
+
+      // 6. concluirEnvio()
+      setSubmitState("saved");
+      submissionSucceededRef.current = true;
+
+      // 7. cancelarAutosavePendente()
+      if (autosaveTimerRef.current) {
+        window.clearTimeout(autosaveTimerRef.current);
+        autosaveTimerRef.current = null;
+      }
       suppressed.current = true;
-      try { await deleteInspectionDraft(userId, editId); }
-      catch { setDraftError("Inspeção salva; não foi possível limpar o rascunho local."); }
-      setDraftRestored(false); setLastSavedDraftTime(null);
-      if (mounted.current) onCancel();
+
+      // 8. removerRascunhoDoUsuario()
+      try {
+        await deleteInspectionDraft(userId, editId);
+      } catch (delErr) {
+        console.warn("[Envio Inspeção] Aviso: erro não impeditivo ao remover rascunho:", delErr);
+      }
+
+      // 9. resetarFormulario()
+      setDraftRestored(false);
+      setLastSavedDraftTime(null);
+      draftRef.current = null;
+
+      // 10. limparPendingDocumentId()
+      recordId.current = dbService.createPendingInspectionId();
+
+      // 11. Navegar sem erros
+      if (mounted.current) {
+        onCancel();
+      }
     } catch (err: any) {
-      console.error(err);
-      setError(err?.message || "Erro ao salvar a inspeção no banco de dados.");
+      setSubmitState("error");
+      submissionSucceededRef.current = false;
+      console.error("[Envio Inspeção] Falha no processo de envio:", {
+        code: err?.code,
+        message: err?.message,
+        stack: err?.stack,
+        uid: currentUser?.id,
+        banco: "ai-studio-gembafta-570b0537-aea6-4a55-ac2a-d81d9f8cc2d0",
+        documentIdPlanejado: recordId.current
+      });
+      setError(err?.message || "Erro ao salvar a inspeção. O rascunho foi mantido com segurança para nova tentativa.");
     } finally {
       submitLock.current = false;
-      if (mounted.current) setIsSaving(false);
+      if (mounted.current && submitState !== "saved") {
+        setIsSaving(false);
+        setSubmitState("idle");
+      }
     }
   };
 
@@ -515,8 +662,31 @@ export default function LancarInspecaoView({
 
       {/* ERROR BOX */}
       {error && (
-        <div className="p-3 bg-red-50 border-l-4 border-red-500 rounded-r-lg text-red-700 text-xs font-semibold flex items-center gap-2">
-          <AlertTriangle size={14} className="shrink-0" /> {error}
+        <div
+          id="inspection-submit-error-banner"
+          role="alert"
+          className="p-4 bg-red-50 border border-red-200 rounded-xl text-red-800 text-xs font-medium space-y-2 shadow-2xs animate-fade-in"
+        >
+          <div className="flex items-center gap-2 font-bold text-red-900">
+            <AlertTriangle size={16} className="text-red-600 shrink-0" />
+            <span>Não foi possível concluir o registro da inspeção</span>
+          </div>
+          <p className="pl-6 text-red-700 leading-relaxed">{error}</p>
+          <div className="pl-6 flex items-center gap-3 pt-1">
+            <button
+              type="button"
+              onClick={() => {
+                setError("");
+                handleSubmit({ preventDefault: () => {} } as any);
+              }}
+              disabled={isSaving}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-bold transition-colors cursor-pointer disabled:opacity-50"
+            >
+              <RefreshCw size={12} />
+              Tentar novamente
+            </button>
+            <span className="text-[11px] text-red-600">Seu preenchimento e rascunho foram mantidos com segurança.</span>
+          </div>
         </div>
       )}
 
@@ -960,9 +1130,22 @@ export default function LancarInspecaoView({
         {/* Buttons Action footer */}
         <div className="inspection-actions border-t border-gray-100 pt-5 flex flex-col gap-3">
           {error && (
-            <div className="p-3 bg-red-50 border-l-4 border-red-500 rounded-r-lg text-red-700 text-xs font-semibold flex items-center gap-2 self-end max-w-lg">
-              <AlertTriangle size={14} className="shrink-0 animate-pulse" />
-              <span>{error}</span>
+            <div className="p-3 bg-red-50 border-l-4 border-red-500 rounded-r-lg text-red-700 text-xs font-semibold flex items-center justify-between gap-3 self-end max-w-xl">
+              <div className="flex items-center gap-2">
+                <AlertTriangle size={14} className="shrink-0 animate-pulse" />
+                <span>{error}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setError("");
+                  handleSubmit({ preventDefault: () => {} } as any);
+                }}
+                disabled={isSaving}
+                className="inline-flex items-center gap-1 px-2.5 py-1 bg-red-600 hover:bg-red-700 text-white text-[11px] font-bold rounded cursor-pointer shrink-0"
+              >
+                <RefreshCw size={11} /> Tentar novamente
+              </button>
             </div>
           )}
           {compressingStatus && (
@@ -982,17 +1165,27 @@ export default function LancarInspecaoView({
             </button>
             <button
               type="submit"
-              disabled={isSaving || !!compressingStatus}
+              disabled={isSaving || submitLock.current || !!compressingStatus}
               className="flex items-center gap-1.5 px-6 py-2.5 bg-[#0B2E59] hover:bg-[#133e72] text-white text-xs font-black rounded-lg shadow shadow-blue-500/10 cursor-pointer disabled:opacity-50"
             >
-              {isSaving ? (
+              {submitState === "validating" ? (
                 <>
                   <div className="animate-spin rounded-full h-3 w-3 border-2 border-white border-t-transparent"></div>
-                  Salvando...
+                  Validando dados...
+                </>
+              ) : submitState === "saving" ? (
+                <>
+                  <div className="animate-spin rounded-full h-3 w-3 border-2 border-white border-t-transparent"></div>
+                  Registrando no banco...
+                </>
+              ) : submitState === "saved" ? (
+                <>
+                  <CheckCircle size={14} className="text-emerald-400" />
+                  Salvo com sucesso!
                 </>
               ) : (
                 <>
-                  <Save size={14} /> Registrar GEMBA
+                  <Save size={14} /> {editingInspection ? "Salvar Alterações" : "Registrar GEMBA"}
                 </>
               )}
             </button>

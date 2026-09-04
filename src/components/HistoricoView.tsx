@@ -43,7 +43,8 @@ import {
   getEffectiveMonthKey,
   getInspectionMonthKey,
   getMonthOptions,
-  getNormalizedInspectionDate
+  getNormalizedInspectionDate,
+  formatDateDisplay
 } from "../utils/inspectionUtils";
 
 import { inspectionBelongsToSupervisor, supervisorMatchesId, normalizeText, getInspectionSupervisorName } from "../utils/supervisors";
@@ -61,6 +62,7 @@ interface HistoricoViewProps {
   onMarkAsDone: (id: string) => void;
   onGeneratePDF: (inspection: Inspection) => void;
   currentUser?: UserProfile | null;
+  highlightedInspectionId?: string | null;
 }
 
 export default function HistoricoView({
@@ -74,7 +76,8 @@ export default function HistoricoView({
   onDelete,
   onMarkAsDone,
   onGeneratePDF,
-  currentUser
+  currentUser,
+  highlightedInspectionId
 }: HistoricoViewProps) {
   const [localMonth, setLocalMonth] = useState("auto");
   const activeMonth = propSelectedMonth !== undefined ? propSelectedMonth : localMonth;
@@ -269,6 +272,21 @@ export default function HistoricoView({
   const pageInspections = filteredInspections.slice((visiblePage - 1) * 25, visiblePage * 25);
   useEffect(() => { setCurrentPage(page => Math.min(page, pageCount)); }, [pageCount]);
 
+  useEffect(() => {
+    if (highlightedInspectionId) {
+      const idx = filteredInspections.findIndex(i => i.id === highlightedInspectionId);
+      if (idx >= 0) {
+        const targetPage = Math.floor(idx / 25) + 1;
+        setCurrentPage(targetPage);
+        const timer = setTimeout(() => {
+          const el = document.getElementById(`inspection-row-${highlightedInspectionId}`);
+          el?.scrollIntoView({ behavior: "smooth", block: "center" });
+        }, 150);
+        return () => clearTimeout(timer);
+      }
+    }
+  }, [highlightedInspectionId, filteredInspections]);
+
   const getPotentialBadge = (potencial: Potential) => {
     switch (potencial) {
       case Potential.LEVE:
@@ -455,11 +473,17 @@ export default function HistoricoView({
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100 text-xs text-gray-700 font-medium">
-              {pageInspections.map((item) => (
-                <tr key={item.id} className="hover:bg-gray-50/50 transition-colors">
+              {pageInspections.map((item) => {
+                const isHighlighted = highlightedInspectionId === item.id;
+                return (
+                <tr
+                  key={item.id}
+                  id={`inspection-row-${item.id}`}
+                  className={`transition-colors ${isHighlighted ? "bg-amber-100/70 ring-2 ring-amber-400 font-semibold" : "hover:bg-gray-50/50"}`}
+                >
                   {/* Data */}
                   <td className="py-3.5 px-4 font-semibold text-[#0B2E59] shrink-0">
-                    {item.data.split("-").reverse().join("/")}
+                    {formatDateDisplay(item.data)}
                   </td>
                   {/* Supervisor */}
                   <td className="py-3.5 px-3 font-bold text-gray-900">
@@ -580,7 +604,7 @@ export default function HistoricoView({
                     </div>
                   </td>
                 </tr>
-              ))}
+              ); })}
               {filteredInspections.length === 0 && (
                 <tr>
                   <td colSpan={9} className="py-10 text-center text-xs text-gray-400 font-semibold">
@@ -642,7 +666,7 @@ export default function HistoricoView({
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 bg-gray-50 p-4 rounded-xl text-xs">
                 <div>
                   <span className="block text-[10px] text-gray-400 font-bold uppercase">Data</span>
-                  <span className="font-bold text-gray-800">{viewingInspection.data.split("-").reverse().join("/")}</span>
+                  <span className="font-bold text-gray-800">{formatDateDisplay(viewingInspection.data)}</span>
                 </div>
                 <div>
                   <span className="block text-[10px] text-gray-400 font-bold uppercase">Supervisor</span>
@@ -725,15 +749,15 @@ export default function HistoricoView({
                         <span className="block text-[10px] text-gray-400 font-bold uppercase">Data de Conclusão</span>
                         <span className="font-bold text-gray-800">
                           {viewingInspection.dataConclusao 
-                            ? viewingInspection.dataConclusao.split("-").reverse().join("/") 
-                            : viewingInspection.data.split("-").reverse().join("/")}
+                            ? formatDateDisplay(viewingInspection.dataConclusao) 
+                            : formatDateDisplay(viewingInspection.data)}
                         </span>
                       </>
                     ) : (
                       <>
                         <span className="block text-[10px] text-gray-400 font-bold uppercase">Prazo de Conclusão</span>
                         <span className="font-bold text-gray-800">
-                          {viewingInspection.prazo.split("-").reverse().join("/")}
+                          {formatDateDisplay(viewingInspection.prazo)}
                         </span>
                       </>
                     )}

@@ -42,5 +42,6 @@ export async function setDoc(ref: any, data: any, options?: any) {
 export const updateDoc = (ref: any, data: any) => setDoc(ref, data, { merge: true });
 export async function deleteDoc(ref: any) { state.deletes.push(ref.path); state.docs.delete(ref.path); }
 export async function getDoc(ref: any) { return snapshot(ref); }
+export async function getDocFromServer(ref: any) { return snapshot(ref); }
 export async function getDocs(ref: any) { state.reads.push(ref.path); return snapshot(ref); }
 export const writeBatch = () => ({ set: () => {}, update: () => {}, delete: () => {}, commit: async () => {} });

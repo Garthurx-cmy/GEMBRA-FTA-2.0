@@ -32,6 +32,7 @@ import {
   serverTimestamp, getDocs as fbGetDocs, query, where,
   writeBatch as fbWriteBatch,
   orderBy, limit, startAfter, getDoc as fbGetDoc,
+  getDocFromServer as fbGetDocFromServer,
   deleteField
 } from "firebase/firestore";
 
@@ -49,6 +50,16 @@ const getDoc = async (ref: any): Promise<any> => {
   });
   return fbGetDoc(ref);
 };
+
+const getDocFromServer = async (ref: any): Promise<any> => {
+  return fbGetDocFromServer(ref);
+};
+
+const isDev = Boolean(
+  typeof process !== "undefined"
+    ? process.env?.NODE_ENV !== "production"
+    : typeof import.meta !== "undefined" && (import.meta as any)?.env?.DEV
+);
 
 const getDocs = async (ref: any): Promise<any> => {
   let path = "unknown-path";
@@ -353,7 +364,17 @@ class DBService {
   private deletedNames: Record<string, string> = {};
   private authorizedEmails: AuthorizedEmail[] = [];
   private syncActive = false;
-  private unsubscribers: Array<() => void> = [];
+  private unsubscribers: {
+    config?: () => void;
+    deleted_names?: () => void;
+    notifications?: () => void;
+    supervisors?: () => void;
+    areas?: () => void;
+    contracts?: () => void;
+    inspections?: () => void;
+    users?: () => void;
+    authorized_emails?: () => void;
+  } = {};
   private metadataPreloaded = false;
   private hasReconciledSupervisors = false;
   private currentSyncProfile?: UserProfile;
@@ -460,9 +481,12 @@ class DBService {
   }
 
   startSync(currentProfile?: UserProfile): void {
-    if (this.syncActive || !hasFirebase || !db || !currentProfile || currentProfile.ativo === false) return;
-    this.syncActive = true;
-    this.inspectionSync = { ...this.inspectionSync, status: "loading", errorCode: null };
+    if (!hasFirebase || !db || !currentProfile || currentProfile.ativo === false) {
+      if (isDev) {
+        console.log("[DB_SYNC] startSync ignorado: perfil ausente, inativo ou firebase indisponível");
+      }
+      return;
+    }
 
     const role = normalizarPerfil(currentProfile.perfil);
     const isAdmin = role === "Desenvolvedor/Admin" || role === "Administrador";
@@ -476,23 +500,43 @@ class DBService {
       [...new Set(requestedGroups.map(group => String(group).trim().toLowerCase())
         .filter((group): group is GrupoContrato => group === "vale" || group === "vli"))];
 
+    // Idempotent: If already syncing for the same user and permissions, do not recreate listeners!
+    if (this.syncActive &&
+        this.currentSyncProfile?.id === currentProfile.id &&
+        this.currentSyncProfile?.perfil === currentProfile.perfil &&
+        JSON.stringify(this.currentPermittedGroups) === JSON.stringify(permittedGroups)) {
+      this.currentSyncProfile = currentProfile;
+      if (isDev) {
+        console.log("[DB_SYNC] startSync idempotente: listeners já ativos para este perfil e permissões.");
+      }
+      return;
+    }
+
+    if (isDev) {
+      console.log(`[DB_SYNC] Iniciando sincronização para ${currentProfile.id} (${currentProfile.nome}), grupos:`, permittedGroups);
+    }
+
+    this.syncActive = true;
+    this.inspectionSync = { ...this.inspectionSync, status: "loading", errorCode: null };
     this.currentSyncProfile = currentProfile;
     this.currentPermittedGroups = permittedGroups;
     this.currentIsAdmin = isAdmin;
     this.currentIsGestor = isGestor;
 
     // 1. Settings (config) - Global listener
-    this.unsubscribers.push(onSnapshot(doc(db, "settings", "config"), snap => {
+    if (this.unsubscribers.config) { this.unsubscribers.config(); delete this.unsubscribers.config; }
+    this.unsubscribers.config = onSnapshot(doc(db, "settings", "config"), snap => {
       this.config = snap.exists() ? ({ ...DEFAULT_CONFIG, ...this.convert(snap.data()) } as SystemConfig) : DEFAULT_CONFIG;
       this.readiness.configReady = true;
       this.emit("config");
     }, err => {
-      console.error("Falha ao sincronizar configurações:", err);
+      if (isDev) console.warn("[DB_SYNC] Falha ao sincronizar configurações:", err);
       this.readiness.configReady = true;
-    }));
+    });
 
     // 2. Deleted Names - Global listener
-    this.unsubscribers.push(onSnapshot(collection(db, "deleted_names"), snap => {
+    if (this.unsubscribers.deleted_names) { this.unsubscribers.deleted_names(); delete this.unsubscribers.deleted_names; }
+    this.unsubscribers.deleted_names = onSnapshot(collection(db, "deleted_names"), snap => {
       this.deletedNames = Object.fromEntries(snap.docs.map(d => [d.id, d.data().name || "Registro removido"]));
       this.readiness.deletedNamesReady = true;
       if (this.rawInspectionDocs.length > 0) {
@@ -501,22 +545,24 @@ class DBService {
       }
       this.emit("deleted_names");
     }, err => {
-      console.error("Falha ao sincronizar nomes removidos:", err);
+      if (isDev) console.warn("[DB_SYNC] Falha ao sincronizar nomes removidos:", err);
       this.readiness.deletedNamesReady = true;
-    }));
+    });
 
     // 3. Notifications - Global listener
-    this.unsubscribers.push(onSnapshot(query(collection(db, "notifications"), orderBy("createdAt", "desc"), limit(20)), snap => {
+    if (this.unsubscribers.notifications) { this.unsubscribers.notifications(); delete this.unsubscribers.notifications; }
+    this.unsubscribers.notifications = onSnapshot(query(collection(db, "notifications"), orderBy("createdAt", "desc"), limit(20)), snap => {
       this.notifications = snap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as AppNotification));
       this.readiness.notificationsReady = true;
       this.emit("notifications");
     }, err => {
-      console.error("Falha ao sincronizar notificações:", err);
+      if (isDev) console.warn("[DB_SYNC] Falha ao sincronizar notificações:", err);
       this.readiness.notificationsReady = true;
-    }));
+    });
 
     // 4. Supervisors - Operational directory filtered by contract permission
-    this.unsubscribers.push(onSnapshot(collection(db, "supervisors"), snap => {
+    if (this.unsubscribers.supervisors) { this.unsubscribers.supervisors(); delete this.unsubscribers.supervisors; }
+    this.unsubscribers.supervisors = onSnapshot(collection(db, "supervisors"), snap => {
       const allSups = snap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as Supervisor));
       if (permittedGroups.length === 1) {
         const targetGroup = permittedGroups[0];
@@ -531,12 +577,13 @@ class DBService {
       }
       this.emit("supervisors");
     }, err => {
-      console.error("Falha ao sincronizar supervisores:", err);
+      if (isDev) console.warn("[DB_SYNC] Falha ao sincronizar supervisores (mantendo dados anteriores):", err);
       this.readiness.supervisorsReady = true;
-    }));
+    });
 
     // 5. Areas - Filtered by contract permission
-    this.unsubscribers.push(onSnapshot(collection(db, "areas"), snap => {
+    if (this.unsubscribers.areas) { this.unsubscribers.areas(); delete this.unsubscribers.areas; }
+    this.unsubscribers.areas = onSnapshot(collection(db, "areas"), snap => {
       const allAreas = snap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as Area));
       if (permittedGroups.length === 1) {
         const targetGroup = permittedGroups[0];
@@ -551,12 +598,13 @@ class DBService {
       }
       this.emit("areas");
     }, err => {
-      console.error("Falha ao sincronizar áreas:", err);
+      if (isDev) console.warn("[DB_SYNC] Falha ao sincronizar áreas (mantendo dados anteriores):", err);
       this.readiness.areasReady = true;
-    }));
+    });
 
     // 6. Contracts - Filtered by contract permission
-    this.unsubscribers.push(onSnapshot(collection(db, "contracts"), snap => {
+    if (this.unsubscribers.contracts) { this.unsubscribers.contracts(); delete this.unsubscribers.contracts; }
+    this.unsubscribers.contracts = onSnapshot(collection(db, "contracts"), snap => {
       const allContracts = snap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as Contract));
       if (permittedGroups.length === 1) {
         const targetGroup = permittedGroups[0];
@@ -574,13 +622,14 @@ class DBService {
       }
       this.emit("contracts");
     }, err => {
-      console.error("Falha ao sincronizar contratos:", err);
+      if (isDev) console.warn("[DB_SYNC] Falha ao sincronizar contratos (mantendo dados anteriores):", err);
       this.readiness.contractsReady = true;
-    }));
+    });
 
     // 7. Inspections - Single unified listener on the full inspections collection.
     // Classification between Vale and VLI and filtering by permitted contract groups
     // are executed strictly in memory to preserve all 411+ historical documents without modifying Firestore.
+    if (this.unsubscribers.inspections) { this.unsubscribers.inspections(); delete this.unsubscribers.inspections; }
     if (permittedGroups.length === 0) {
       this.rawInspectionDocs = [];
       this.inspections = [];
@@ -589,7 +638,7 @@ class DBService {
       this.emit("inspections");
     } else {
       const inspectionsRef = collection(db, "inspections");
-      this.unsubscribers.push(onSnapshot(inspectionsRef, { includeMetadataChanges: true }, snap => {
+      this.unsubscribers.inspections = onSnapshot(inspectionsRef, { includeMetadataChanges: true }, snap => {
         const metadata = snap.metadata || { fromCache: false, hasPendingWrites: false };
         // Empty cache is not proof of an empty server collection. Keep the last data.
         if (!(metadata.fromCache && snap.empty)) {
@@ -607,32 +656,38 @@ class DBService {
           lastServerSnapshotAt: !metadata.fromCache && !metadata.hasPendingWrites
             ? new Date().toISOString() : this.inspectionSync.lastServerSnapshotAt
         };
+        if (isDev) {
+          console.log(`[DB_SYNC] Snapshot de inspeções: ${snap.docs.length} documentos (cache=${metadata.fromCache}, pendente=${metadata.hasPendingWrites})`);
+        }
         this.emit("inspections");
       }, err => {
-        console.error("Falha ao carregar histórico de inspeções:", err);
+        if (isDev) {
+          console.warn("[DB_SYNC] Falha ao sincronizar inspeções (mantendo registros anteriores):", err);
+        }
         this.inspectionSync = { ...this.inspectionSync, status: "error", errorCode: err?.code || "unavailable" };
-        // Keep previous records. A failed read must never be presented as zero records.
         this.emit("inspections");
-      }));
+      });
     }
 
     // 8. Admin-only reads. Synchronization never reconciles or deletes records.
+    if (this.unsubscribers.users) { this.unsubscribers.users(); delete this.unsubscribers.users; }
+    if (this.unsubscribers.authorized_emails) { this.unsubscribers.authorized_emails(); delete this.unsubscribers.authorized_emails; }
     if (isAdmin) {
-      this.unsubscribers.push(onSnapshot(collection(db, "users"), snap => {
+      this.unsubscribers.users = onSnapshot(collection(db, "users"), snap => {
         this.users = snap.docs.map(d => normalizeUserProfile(this.convert(d.data()), d.id));
         this.readiness.usersReady = true;
         this.emit("users");
       }, err => {
-        console.error("Falha ao sincronizar usuários:", err);
+        if (isDev) console.warn("[DB_SYNC] Falha ao sincronizar usuários:", err);
         this.readiness.usersReady = true;
-      }));
+      });
 
-      this.unsubscribers.push(onSnapshot(collection(db, "authorized_emails"), snap => {
+      this.unsubscribers.authorized_emails = onSnapshot(collection(db, "authorized_emails"), snap => {
         this.authorizedEmails = snap.docs.map(d => ({ id: d.id, ...this.convert(d.data()) } as AuthorizedEmail));
         this.emit("authorized_emails");
-      }, err => console.error("Falha ao sincronizar e-mails autorizados:", err)));
-
-      // Reconciliation must be an explicit administrative action, never run at login.
+      }, err => {
+        if (isDev) console.warn("[DB_SYNC] Falha ao sincronizar e-mails autorizados:", err);
+      });
     } else {
       this.readiness.usersReady = true;
     }
@@ -676,9 +731,6 @@ class DBService {
         try {
           await setDoc(doc(db, "supervisors", u.id), supPayload, { merge: true });
           reconciled++;
-
-          // Preserve old supervisor IDs: historical inspections can still reference them.
-          // No document is deleted or reassigned by this routine.
         } catch (err: any) {
           console.warn(`Erro ao reconciliar supervisor para ${u.email}:`, err);
           errors.push(`Erro para ${u.email}: ${err?.message || err}`);
@@ -693,8 +745,13 @@ class DBService {
   }
 
   stopSync(clearData: boolean = false): void {
-    this.unsubscribers.forEach(u => u());
-    this.unsubscribers = [];
+    if (isDev) {
+      console.log(`[DB_SYNC] stopSync chamado (clearData=${clearData})`);
+    }
+    Object.values(this.unsubscribers).forEach(u => {
+      try { u?.(); } catch (_) {}
+    });
+    this.unsubscribers = {};
     this.syncActive = false;
     this.hasReconciledSupervisors = false;
     if (clearData) {
@@ -724,6 +781,7 @@ class DBService {
       };
     }
   }
+
 
   async getPaginatedInspections(options: {
     limit: number;
@@ -962,13 +1020,30 @@ class DBService {
     });
 
     try {
+      if (isDev) {
+        console.log(`[INSPECTION_SAVE] Iniciando gravação da inspeção ${inspection.id}...`);
+      }
       // Somente a confirmação do documento principal define o sucesso. O ID é
       // estável no rascunho, portanto uma nova tentativa faz merge no mesmo
       // documento e não cria inspeção duplicada.
       await waitForFirestoreConfirmation(
         setDoc(doc(db, "inspections", inspection.id), payload, { merge: true })
       );
+      if (isDev) {
+        console.log(`[INSPECTION_SAVE] Documento gravado. Confirmando existência no servidor via getDocFromServer para ${inspection.id}...`);
+      }
+      const docRef = doc(db, "inspections", inspection.id);
+      const serverSnap = await getDocFromServer(docRef);
+      if (!serverSnap.exists()) {
+        throw new Error("Documento não foi confirmado pelo servidor Firestore após gravação.");
+      }
+      if (isDev) {
+        console.log(`[INSPECTION_SAVE] Confirmação no servidor obtida com sucesso para ${inspection.id}.`);
+      }
     } catch (error) {
+      if (isDev) {
+        console.error(`[INSPECTION_SAVE] Erro durante gravação/confirmação da inspeção ${inspection.id}:`, error);
+      }
       throw getFriendlyInspectionSaveError(error);
     }
 

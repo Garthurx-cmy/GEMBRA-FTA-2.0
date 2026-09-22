@@ -18,6 +18,7 @@ const updateDoc = async (ref: any, data: any) => {
 import { dbService, normalizeUserProfile, hasLegacyUppercaseFields } from "./services/db";
 import { buildUnifiedSupervisors, resolveSupervisorName, canLaunchInspection } from "./utils/supervisors";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { subscribeVersionChanges, getCurrentVersion } from "./utils/versionManager";
 import {
   Inspection,
   Supervisor,
@@ -41,7 +42,7 @@ import RelatoriosView from "./components/RelatoriosView";
 import ExportacoesView from "./components/ExportacoesView";
 import ConfiguracoesView from "./components/ConfiguracoesView";
 import ResolvedImage from "./components/ResolvedImage";
-import { CheckCircle, AlertCircle, Building2, Bell, Search, FileText, X, ExternalLink, Eye, EyeOff } from "lucide-react";
+import { CheckCircle, AlertCircle, Building2, Bell, Search, FileText, X, ExternalLink, Eye, EyeOff, RefreshCw } from "lucide-react";
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<string>("dashboard");
@@ -83,6 +84,23 @@ export default function App() {
   const [resetSuccessMsg, setResetSuccessMsg] = useState("");
   const [isChangingPassword, setIsChangingPassword] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
+
+  // --- VERSION AND AUTO-UPDATE STATE ---
+  const [versionInfo, setVersionInfo] = useState<{
+    currentVersion: string;
+    serverVersion: string | null;
+    hasUpdate: boolean;
+    canAutoReload: boolean;
+  }>({
+    currentVersion: getCurrentVersion(),
+    serverVersion: null,
+    hasUpdate: false,
+    canAutoReload: true
+  });
+
+  useEffect(() => {
+    return subscribeVersionChanges(setVersionInfo);
+  }, []);
 
   // --- GLOBAL SEARCH, MONTH & CONTRACT GROUP FILTER STATES ---
   const [globalSearchTerm, setGlobalSearchTerm] = useState("");
@@ -1173,6 +1191,46 @@ export default function App() {
         {/* SCREEN WORKSPACE INNER CONTAINER */}
         <main className="flex-1 overflow-y-auto px-4 pt-4 pb-20 md:pt-5 md:pb-20 print:p-0">
           <div className="max-w-7xl mx-auto h-full">
+
+            {versionInfo.hasUpdate && (
+              <div
+                id="version-update-banner"
+                role="alert"
+                className="mb-4 rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-3 no-print"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="w-8 h-8 rounded-full bg-amber-200 text-[#0B2E59] flex items-center justify-center shrink-0">
+                    <RefreshCw size={16} />
+                  </div>
+                  <div>
+                    <span className="font-bold block text-sm text-[#0B2E59]">
+                      Nova versão disponível. Seus dados estão preservados. Conclua ou salve o preenchimento antes de atualizar.
+                    </span>
+                    <span className="text-xs text-amber-700">
+                      Versão em execução: {versionInfo.currentVersion} • Versão no servidor: {versionInfo.serverVersion || "nova"}
+                    </span>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  id="btn-apply-system-update"
+                  onClick={() => {
+                    if (typeof window !== "undefined") {
+                      try {
+                        if (versionInfo.serverVersion) {
+                          window.sessionStorage?.setItem("gemba_reloaded_version", versionInfo.serverVersion);
+                        }
+                      } catch {}
+                      window.location.reload();
+                    }
+                  }}
+                  className="inline-flex items-center justify-center gap-2 px-4 py-2 bg-[#0B2E59] hover:bg-[#082242] text-white text-xs font-bold rounded-lg transition-colors shadow-sm shrink-0 cursor-pointer"
+                >
+                  <RefreshCw size={14} />
+                  Atualizar sistema
+                </button>
+              </div>
+            )}
 
             {inspectionSyncInfo.status === "error" && (
               <div role="alert" className="mb-4 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">

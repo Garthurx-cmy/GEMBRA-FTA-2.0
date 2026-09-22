@@ -1,5 +1,6 @@
 import { getNormalizedInspectionDate, getOperationalDateKey } from "../utils/inspectionUtils";
 import { supervisorMatchesId } from "../utils/supervisors";
+import { setSubmissionState, setFormActive, setHasPendingDraft } from "../utils/versionManager";
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
@@ -173,6 +174,29 @@ export default function LancarInspecaoView({
   const userId = currentUser?.id || "anon";
   const editId = editingInspection?.id;
   const scope = `${userId}:${editId || "new"}:${resetVersion}`;
+
+  useEffect(() => {
+    setFormActive(true);
+    return () => {
+      setFormActive(false);
+      setSubmissionState("idle");
+    };
+  }, []);
+
+  useEffect(() => {
+    setSubmissionState(submitState);
+  }, [submitState]);
+
+  useEffect(() => {
+    const hasDraftData = Boolean(
+      lastSavedDraftTime ||
+      draftRestored ||
+      fotosAntes.length > 0 ||
+      fotosDepois.length > 0 ||
+      descricao.trim().length > 0
+    );
+    setHasPendingDraft(hasDraftData);
+  }, [lastSavedDraftTime, draftRestored, fotosAntes.length, fotosDepois.length, descricao]);
 
   // Initialize only this user/record. Live directory snapshots must not reset fields.
   useEffect(() => {

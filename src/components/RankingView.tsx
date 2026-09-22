@@ -36,7 +36,8 @@ import {
 import {
   getUniqueMonthlyInspections,
   getEffectiveMonthKey,
-  getMonthOptions
+  getMonthOptions,
+  isAllMonths
 } from "../utils/inspectionUtils";
 import { SCORING_RULES, calculateInspectionScore } from "../utils/scoring";
 import {
@@ -117,7 +118,8 @@ export default function RankingView({
 
   // Compute monthly inspections filtered by contract group
   const monthlyInspections = useMemo(() => {
-    const rawMonthly = getUniqueMonthlyInspections(inspections, getEffectiveMonthKey(activeMonth, operationalToday));
+    const monthKey = isAllMonths(activeMonth) ? "all" : getEffectiveMonthKey(activeMonth, operationalToday);
+    const rawMonthly = getUniqueMonthlyInspections(inspections, monthKey, operationalToday);
     if (effectiveContract === "todos") {
       return rawMonthly;
     }
@@ -268,7 +270,7 @@ export default function RankingView({
             <span className="text-xs font-bold text-gray-600 uppercase">Mês:</span>
             <select
               id="ranking-month-select"
-              value={activeMonth}
+              value={isAllMonths(activeMonth) ? "all" : activeMonth}
               onChange={(e) => handleMonthChange(e.target.value)}
               className="text-xs font-extrabold text-[#0B2E59] bg-white border border-gray-200 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-1 focus:ring-[#F58220] cursor-pointer shadow-2xs"
             >

@@ -10,6 +10,22 @@ import { getMembrosMetaDashboard, getSupervisorTargets } from "../src/utils/oper
 import { getUniqueMonthlyInspections } from "../src/utils/inspectionUtils";
 import { Potential, InspectionStatus } from "../src/types";
 
+const events = new EventTarget();
+const storageMap = new Map<string, string>();
+const localStorageMock = {
+  getItem: (k: string) => storageMap.get(k) ?? null,
+  setItem: (k: string, v: string) => storageMap.set(k, String(v)),
+  removeItem: (k: string) => storageMap.delete(k),
+  clear: () => storageMap.clear()
+};
+Object.assign(globalThis, {
+  window: {
+    dispatchEvent: events.dispatchEvent.bind(events),
+    localStorage: localStorageMock
+  },
+  localStorage: localStorageMock
+});
+
 function setupCommonVliData() {
   state.docs.set("areas/area-vli-1", { id: "area-vli-1", nome: "Oficina FCA", grupoContrato: "vli", ativo: true });
   state.docs.set("contracts/ctr-vli-1", { id: "ctr-vli-1", codigo: "01", nome: "Contrato Geral VLI", grupoContrato: "vli", ativo: true });
